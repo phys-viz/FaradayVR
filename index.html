@@ -86,7 +86,10 @@ const ANIM_SPEED  = 0.35;
 // ═══════════════════════════════════════════════════════════════════════════
 let magnetX=0, magnetY=4.0, magnetZ=0;
 let magnetStrength=1.0, magnetFlipped=false;
-let emf=0, markerPhase=0, animateT=0;
+let emf=0, emfSmoothed=0, markerPhase=0, animateT=0;
+const EMF_SMOOTH     = 0.12;            // lower = more smoothing (0.0–1.0)
+const HAPTIC_THRESH  = EMF_SAT * 0.25; // haptics only above 25% of saturation
+const HAPTIC_MAX_INT = 0.45;            // never pulse harder than this
 let prevTs=null, isPresenting=false;
 
 // Windowed finite-difference EMF (for live VR controller movement)
@@ -294,7 +297,7 @@ function drawPanel() {
   pCtx.strokeStyle='#0d1e30'; pCtx.lineWidth=1;
   pCtx.beginPath(); pCtx.moveTo(18,48); pCtx.lineTo(W-18,48); pCtx.stroke();
 
-  const active = Math.abs(emf) > EMF_THRESH;
+  const active = Math.abs(emfSmoothed) > EMF_THRESH;
 
   if(!active) {
     pCtx.fillStyle='#2a4868';
@@ -305,7 +308,7 @@ function drawPanel() {
     pCtx.fillText('Right controller = magnet', W/2, 138);
   } else {
     // emf = -dΦ/dt  →  increasing when -emf > 0
-    const increasing = -emf > 0;
+    const increasing = -emfSmoothed > 0;
 
     // Row 1: flux state
     pCtx.fillStyle='#69f0ae';
@@ -472,20 +475,21 @@ const _fromVec=new THREE.Vector3(1,0,0);
 const _toVec  =new THREE.Vector3();
 
 function updateMarkers(dt) {
-  if(Math.abs(emf) < EMF_THRESH){ markerGroup.visible=false; return; }
+  if(Math.abs(emfSmoothed) < EMF_THRESH){ markerGroup.visible=false; return; }
   markerGroup.visible=true;
   const opacity=Math.min(1.0,(Math.abs(emf)-EMF_THRESH)/(EMF_SAT-EMF_THRESH));
   markerMat.opacity=0.15+0.85*opacity;
-  markerPhase=((markerPhase - EMF_SPEED_K*emf*dt) % 1 + 1) % 1;
+  markerPhase=((markerPhase - EMF_SPEED_K*emfSmoothed*dt) % 1 + 1) % 1;
   for(let m=0; m<N_MARKERS; m++){
     const t=(markerPhase + m/N_MARKERS) % 1;
     const {x,z,tx:rawTx,tz:rawTz}=loopPosDir(t);
-    const dir=emf>=0?-1:1;
+    const dir=emfSmoothed>=0?-1:1;
     markerMeshes[m].position.set(x, LOOP_VR_Y+0.012, z);
     markerMeshes[m].quaternion.setFromUnitVectors(_fromVec,
       _toVec.set(rawTx*dir, 0, rawTz*dir).normalize());
   }
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  HAPTICS
@@ -568,6 +572,9 @@ renderer.setAnimationLoop(function(ts) {
     emf = computeEmfAuto();
   }
 
+
+  // -- Smooth EMF: kills tremor noise, preserves intentional motion
+  emfSmoothed += (emf - emfSmoothed) * EMF_SMOOTH;
   // ── Position magnet mesh (sim coords → VR meters) ─────────────────────
   magnetGroup.position.set(
     magnetX * SIM_SCALE,
@@ -603,9 +610,11 @@ renderer.setAnimationLoop(function(ts) {
   }
   drawPanel();
 
-  // ── Haptics ───────────────────────────────────────────────────────────
-  if(isPresenting && Math.abs(emf) > EMF_THRESH)
-    pulseHaptics(Math.abs(emf) / EMF_SAT);
+  // ── Haptics: higher threshold, gentler curve, hard cap ──────────────
+  if(isPresenting && Math.abs(emfSmoothed) > HAPTIC_THRESH) {
+    const t = (Math.abs(emfSmoothed) - HAPTIC_THRESH) / (EMF_SAT - HAPTIC_THRESH);
+    pulseHaptics(Math.min(HAPTIC_MAX_INT, t * HAPTIC_MAX_INT));
+  }
 
   renderer.render(scene, camera);
 });
