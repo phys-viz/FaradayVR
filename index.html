@@ -93,6 +93,29 @@ const HAPTIC_THRESH  = EMF_SAT * 0.25; // haptics only above 25% of saturation
 const HAPTIC_MAX_INT = 0.45;            // never pulse harder than this
 let prevTs=null, isPresenting=false;
 
+// ── Freeze state ──────────────────────────────────────────────────────────
+let frozen       = false;          // are we currently frozen?
+let frozenMagX   = 0, frozenMagY = 4.0, frozenMagZ = 0;  // world-space freeze pos
+
+// ── Unfreeze lerp ─────────────────────────────────────────────────────────
+let lerpActive   = false;          // lerping magnet back to controller?
+let lerpT        = 0;              // 0→1 over LERP_DUR seconds
+const LERP_DUR   = 0.5;
+let lerpStartX   = 0, lerpStartY  = 4.0, lerpStartZ = 0;
+
+// ── Panel lazy-follow ─────────────────────────────────────────────────────
+const PANEL_DIST    = 1.2;         // metres in front of player
+const PANEL_DROP    = 0.22;        // metres below eye level
+const PANEL_FOLLOW  = 0.015;       // lerp speed per frame (0=frozen, 1=instant)
+const _panelTarget  = new THREE.Vector3();
+const _camFwd       = new THREE.Vector3();
+const _xrCamPos     = new THREE.Vector3();
+const _xrCamQuat    = new THREE.Quaternion();
+
+// ── Button edge-detection ─────────────────────────────────────────────────
+let prevTrigger = false;           // index trigger (freeze)
+let prevBtnA    = false;           // button A (flip polarity)
+
 // Windowed finite-difference EMF (for live VR controller movement)
 const W_SIZE = 12;
 const wPhi   = new Float32Array(W_SIZE);
@@ -261,13 +284,13 @@ for(let m=0; m<N_MARKERS; m++){
 // ═══════════════════════════════════════════════════════════════════════════
 //  FLOATING INFO PANEL  (canvas texture, billboards toward headset)
 // ═══════════════════════════════════════════════════════════════════════════
-const PANEL_W=512, PANEL_H=256;
+const PANEL_W=512, PANEL_H=320;
 const panelCanvas = document.createElement('canvas');
 panelCanvas.width=PANEL_W; panelCanvas.height=PANEL_H;
 const pCtx = panelCanvas.getContext('2d');
 const panelTex = new THREE.CanvasTexture(panelCanvas);
 const panelMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.52, 0.26),
+  new THREE.PlaneGeometry(0.52, 0.33),
   new THREE.MeshBasicMaterial({ map:panelTex, transparent:true, side:THREE.DoubleSide })
 );
 panelMesh.position.set(0, LOOP_VR_Y + 0.48, LOOP_VR_Z - 0.52);
@@ -286,57 +309,112 @@ function drawPanel() {
   pCtx.clearRect(0,0,W,H);
 
   // Background
-  pCtx.fillStyle='rgba(5,11,19,0.93)'; rr(pCtx,0,0,W,H,18); pCtx.fill();
-  pCtx.strokeStyle='#1a3050'; pCtx.lineWidth=2;
+  pCtx.fillStyle='rgba(5,11,19,0.95)'; rr(pCtx,0,0,W,H,18); pCtx.fill();
+  // Border: amber when frozen, dark blue when live
+  pCtx.strokeStyle = frozen ? '#ffa000' : '#1a3050';
+  pCtx.lineWidth = frozen ? 3 : 2;
   rr(pCtx,1,1,W-2,H-2,18); pCtx.stroke();
 
   pCtx.textAlign='center';
-  pCtx.fillStyle='#4fc3f7';
-  pCtx.font="bold 25px 'Share Tech Mono', monospace";
-  pCtx.fillText("FARADAY'S LAW", W/2, 36);
 
-  pCtx.strokeStyle='#0d1e30'; pCtx.lineWidth=1;
-  pCtx.beginPath(); pCtx.moveTo(18,48); pCtx.lineTo(W-18,48); pCtx.stroke();
+  if(frozen) {
+    // ── FROZEN STATE: full Lenz's law breakdown ─────────────────────────
+    // Header with FROZEN badge
+    pCtx.fillStyle='#ffa000';
+    pCtx.font="bold 22px 'Share Tech Mono', monospace";
+    pCtx.fillText("FARADAY'S LAW  ·  ❚❚ FROZEN", W/2, 34);
 
-  const active = Math.abs(emfSmoothed) > EMF_THRESH;
+    pCtx.strokeStyle='#3a2800'; pCtx.lineWidth=1;
+    pCtx.beginPath(); pCtx.moveTo(18,46); pCtx.lineTo(W-18,46); pCtx.stroke();
 
-  if(!active) {
-    pCtx.fillStyle='#2a4868';
-    pCtx.font="19px 'Share Tech Mono', monospace";
-    pCtx.fillText('Move the magnet through the loop', W/2, 108);
-    pCtx.fillStyle='#1a3050';
-    pCtx.font="13px 'Share Tech Mono', monospace";
-    pCtx.fillText('Right controller = magnet', W/2, 138);
-  } else {
-    // emf = -dΦ/dt  →  increasing when -emf > 0
     const increasing = -emfSmoothed > 0;
+    const active = Math.abs(emfSmoothed) > EMF_THRESH;
 
-    // Row 1: flux state
-    pCtx.fillStyle='#69f0ae';
-    pCtx.font="bold 23px 'Rajdhani', sans-serif";
-    pCtx.fillText('FLUX ' + (increasing ? 'INCREASING  ↑' : 'DECREASING  ↓'), W/2, 86);
+    if(!active) {
+      pCtx.fillStyle='#4a3800';
+      pCtx.font="17px 'Share Tech Mono', monospace";
+      pCtx.fillText('Magnet is stationary', W/2, 100);
+      pCtx.fillStyle='#3a2800';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('No changing flux — no EMF', W/2, 126);
+    } else {
+      // Step 1: Magnet motion
+      pCtx.fillStyle='#7aabcf';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.textAlign='left';
+      pCtx.fillText('MAGNET', 24, 68);
+      pCtx.fillStyle='#b8ccd8';
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Moving toward loop  ↓' : 'Moving away from loop  ↑', 24, 88);
 
-    // Row 2: induced B direction (Lenz)
-    pCtx.fillStyle='#b388ff';
-    pCtx.font="16px 'Share Tech Mono', monospace";
-    pCtx.fillText('Induced B: ' + (increasing ? '↓  opposes the change' : '↑  opposes the change'), W/2, 116);
+      // Step 2: Flux
+      pCtx.fillStyle='#69f0ae';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('FLUX', 24, 114);
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Upward flux INCREASING' : 'Upward flux DECREASING', 24, 134);
 
-    // Row 3: induced current direction
-    pCtx.fillStyle='#ff44cc';
-    pCtx.font="bold 21px 'Rajdhani', sans-serif";
-    pCtx.fillText('Current: ' + (increasing ? 'clockwise  (from above)' : 'counter-clockwise'), W/2, 152);
+      // Step 3: Induced B
+      pCtx.fillStyle='#b388ff';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('INDUCED B  (opposes change)', 24, 160);
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Points downward  ↓' : 'Points upward  ↑', 24, 180);
 
-    // EMF strength bar
-    const bX=56, bY=172, bW=400, bH=13;
-    pCtx.fillStyle='#07111c'; pCtx.fillRect(bX,bY,bW,bH);
-    const fill = Math.min(1.0, Math.abs(emf)/EMF_SAT) * bW;
-    const grad = pCtx.createLinearGradient(bX,0,bX+bW,0);
-    grad.addColorStop(0,'#0d2040'); grad.addColorStop(0.5,'#4fc3f7'); grad.addColorStop(1,'#ffd54f');
-    pCtx.fillStyle=grad; pCtx.fillRect(bX,bY,fill,bH);
-    pCtx.strokeStyle='#1a3050'; pCtx.lineWidth=1; pCtx.strokeRect(bX,bY,bW,bH);
-    pCtx.fillStyle='#3a5570';
-    pCtx.font="11px 'Share Tech Mono', monospace";
-    pCtx.fillText('EMF STRENGTH', W/2, bY+bH+15);
+      // Step 4: Current
+      pCtx.fillStyle='#ff44cc';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('INDUCED CURRENT', 24, 206);
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Clockwise  (viewed from above)' : 'Counter-clockwise', 24, 226);
+
+      pCtx.textAlign='center';
+      pCtx.fillStyle='#3a2800';
+      pCtx.font="11px 'Share Tech Mono', monospace";
+      pCtx.fillText('Trigger to resume', W/2, 248);
+    }
+
+  } else {
+    // ── ACTIVE STATE: minimal ───────────────────────────────────────────
+    pCtx.fillStyle='#4fc3f7';
+    pCtx.font="bold 22px 'Share Tech Mono', monospace";
+    pCtx.fillText("FARADAY'S LAW", W/2, 34);
+
+    pCtx.strokeStyle='#0d1e30'; pCtx.lineWidth=1;
+    pCtx.beginPath(); pCtx.moveTo(18,46); pCtx.lineTo(W-18,46); pCtx.stroke();
+
+    const active = Math.abs(emfSmoothed) > EMF_THRESH;
+
+    if(!active) {
+      pCtx.fillStyle='#2a4868';
+      pCtx.font="18px 'Share Tech Mono', monospace";
+      pCtx.fillText('Move the magnet through the loop', W/2, 108);
+      pCtx.fillStyle='#1a3050';
+      pCtx.font="12px 'Share Tech Mono', monospace";
+      pCtx.fillText('Trigger = freeze  ·  A = flip polarity', W/2, 136);
+    } else {
+      const increasing = -emfSmoothed > 0;
+
+      pCtx.fillStyle='#69f0ae';
+      pCtx.font="bold 24px 'Rajdhani', sans-serif";
+      pCtx.fillText('FLUX ' + (increasing ? 'INCREASING  ↑' : 'DECREASING  ↓'), W/2, 90);
+
+      pCtx.fillStyle='#ff44cc';
+      pCtx.font="bold 22px 'Rajdhani', sans-serif";
+      pCtx.fillText('Current: ' + (increasing ? 'clockwise' : 'counter-clockwise'), W/2, 126);
+
+      // EMF bar
+      const bX=56, bY=152, bW=400, bH=14;
+      pCtx.fillStyle='#07111c'; pCtx.fillRect(bX,bY,bW,bH);
+      const fill = Math.min(1.0, Math.abs(emfSmoothed)/EMF_SAT) * bW;
+      const grad = pCtx.createLinearGradient(bX,0,bX+bW,0);
+      grad.addColorStop(0,'#0d2040'); grad.addColorStop(0.5,'#4fc3f7'); grad.addColorStop(1,'#ffd54f');
+      pCtx.fillStyle=grad; pCtx.fillRect(bX,bY,fill,bH);
+      pCtx.strokeStyle='#1a3050'; pCtx.lineWidth=1; pCtx.strokeRect(bX,bY,bW,bH);
+      pCtx.fillStyle='#3a5570';
+      pCtx.font="11px 'Share Tech Mono', monospace";
+      pCtx.fillText('EMF STRENGTH', W/2, bY+bH+16);
+    }
   }
 
   panelTex.needsUpdate = true;
@@ -543,28 +621,79 @@ renderer.setAnimationLoop(function(ts) {
   prevTs=ts;
 
   if(isPresenting) {
-    // ── VR: right controller grip drives magnet position ──────────────────
-    const session=renderer.xr.getSession();
+    // ── Poll right controller input sources ───────────────────────────────
+    const session = renderer.xr.getSession();
     if(session) {
-      // Update right-hand grip index from input sources
-      session.inputSources.forEach((src,i) => {
-        if(i<2 && src.handedness==='right') rightGripIdx=i;
+      session.inputSources.forEach((src, i) => {
+        if(i < 2 && src.handedness === 'right') rightGripIdx = i;
+
+        if(src.handedness === 'right' && src.gamepad) {
+          const gp = src.gamepad;
+
+          // Index trigger (axes[3] or buttons[0]) — freeze toggle
+          const trigVal  = gp.buttons[0]?.pressed ?? false;
+          if(trigVal && !prevTrigger) {
+            if(!frozen) {
+              // FREEZE — snap magnet to current sim position
+              frozen     = true;
+              lerpActive = false;
+              frozenMagX = magnetX; frozenMagY = magnetY; frozenMagZ = magnetZ;
+            } else {
+              // UNFREEZE — start lerp back to controller
+              frozen     = false;
+              lerpActive = true;
+              lerpT      = 0;
+              lerpStartX = magnetX; lerpStartY = magnetY; lerpStartZ = magnetZ;
+              // Reset EMF window so no phantom spike
+              wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
+            }
+          }
+          prevTrigger = trigVal;
+
+          // Button A (buttons[4] on Quest) — flip polarity
+          const btnA = gp.buttons[4]?.pressed ?? false;
+          if(btnA && !prevBtnA) {
+            magnetFlipped = !magnetFlipped;
+            northMat.color.setHex(magnetFlipped ? 0x3366cc : 0xcc3333);
+            southMat.color.setHex(magnetFlipped ? 0xcc3333 : 0x3366cc);
+            // Reset EMF window on flip
+            wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
+          }
+          prevBtnA = btnA;
+        }
       });
     }
+
     grips[rightGripIdx].getWorldPosition(_gripPos);
+    // Live controller sim coords (used for lerp target even while frozen)
+    const ctrlSimX = _gripPos.x / SIM_SCALE;
+    const ctrlSimY = (_gripPos.y - LOOP_VR_Y) / SIM_SCALE;
+    const ctrlSimZ = (_gripPos.z - LOOP_VR_Z) / SIM_SCALE;
 
-    // Convert VR meters → sim coordinates
-    magnetX = _gripPos.x / SIM_SCALE;
-    magnetY = (_gripPos.y - LOOP_VR_Y) / SIM_SCALE;
-    magnetZ = (_gripPos.z - LOOP_VR_Z) / SIM_SCALE;
-
-    // Soft singularity guard: keep magnet away from loop plane when near axis
-    if(Math.abs(magnetY) < 0.4) {
-      const r=Math.sqrt(magnetX*magnetX + magnetZ*magnetZ);
-      if(r < 2.0) magnetY = magnetY>=0 ? 0.4 : -0.4;
+    if(frozen) {
+      // Frozen — hold last snapped position, no EMF update
+      magnetX = frozenMagX; magnetY = frozenMagY; magnetZ = frozenMagZ;
+    } else if(lerpActive) {
+      // Lerping back to controller
+      lerpT += dt / LERP_DUR;
+      if(lerpT >= 1.0) { lerpT = 1.0; lerpActive = false; }
+      const ease = lerpT * lerpT * (3 - 2*lerpT);  // smoothstep
+      magnetX = lerpStartX + (ctrlSimX - lerpStartX) * ease;
+      magnetY = lerpStartY + (ctrlSimY - lerpStartY) * ease;
+      magnetZ = lerpStartZ + (ctrlSimZ - lerpStartZ) * ease;
+      // EMF suppressed during lerp — already reset on unfreeze
+    } else {
+      // Normal live tracking
+      magnetX = ctrlSimX; magnetY = ctrlSimY; magnetZ = ctrlSimZ;
     }
 
-    updateEmfManual(computePhi(magnetY), ts);
+    // Singularity guard
+    if(Math.abs(magnetY) < 0.4) {
+      const r = Math.sqrt(magnetX*magnetX + magnetZ*magnetZ);
+      if(r < 2.0) magnetY = magnetY >= 0 ? 0.4 : -0.4;
+    }
+
+    if(!frozen && !lerpActive) updateEmfManual(computePhi(magnetY), ts);
 
   } else {
     // ── Desktop preview: auto-animate ────────────────────────────────────
@@ -589,23 +718,41 @@ renderer.setAnimationLoop(function(ts) {
   northMat.opacity = fade;
   southMat.opacity = fade;
 
-  // ── Update B arrows ───────────────────────────────────────────────────
-  updateArrows();
+  // ── Amber loop wire when frozen ─────────────────────────────────────────
+  loopMat.color.setHex(frozen ? 0xffa000 : 0x4fc3f7);
+
+  // ── Update B arrows (skip if frozen) ─────────────────────────────────────
+  if(!frozen) updateArrows();
 
   // ── Update current markers ────────────────────────────────────────────
   updateMarkers(dt);
 
   // ── Update loop glow disc ─────────────────────────────────────────────
-  const phi     = computePhi(magnetY);
-  const glowT   = Math.min(1.0, Math.abs(phi) / 0.5);
-  discMat.opacity = 0.02 + 0.13*glowT;
-  if(phi >= 0) discMat.color.setRGB(0.35+0.3*glowT, 0.95, 0.55);
-  else         discMat.color.setRGB(0.15, 0.45+0.1*glowT, 0.92);
+  if(!frozen) {
+    const phi   = computePhi(magnetY);
+    const glowT = Math.min(1.0, Math.abs(phi) / 0.5);
+    discMat.opacity = 0.02 + 0.13*glowT;
+    if(phi >= 0) discMat.color.setRGB(0.35+0.3*glowT, 0.95, 0.55);
+    else         discMat.color.setRGB(0.15, 0.45+0.1*glowT, 0.92);
+  }
 
-  // ── Panel billboard + draw ────────────────────────────────────────────
+  // ── Panel lazy-follow + billboard ───────────────────────────────────────
   if(isPresenting) {
-    renderer.xr.getCamera(camera).getWorldPosition(_headPos);
-    panelMesh.lookAt(_headPos);
+    const xrCam = renderer.xr.getCamera(camera);
+    xrCam.getWorldPosition(_xrCamPos);
+    xrCam.getWorldQuaternion(_xrCamQuat);
+    // Camera forward in world space
+    _camFwd.set(0, 0, -1).applyQuaternion(_xrCamQuat);
+    _camFwd.y = 0;
+    if(_camFwd.lengthSq() < 0.001) _camFwd.set(0, 0, -1);
+    _camFwd.normalize();
+    // Target: PANEL_DIST ahead, PANEL_DROP below eye
+    _panelTarget.copy(_xrCamPos)
+      .addScaledVector(_camFwd, PANEL_DIST);
+    _panelTarget.y = _xrCamPos.y - PANEL_DROP;
+    // Lazy lerp toward target
+    panelMesh.position.lerp(_panelTarget, PANEL_FOLLOW);
+    panelMesh.lookAt(_xrCamPos);
   } else {
     panelMesh.lookAt(camera.position);
   }
