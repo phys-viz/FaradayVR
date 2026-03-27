@@ -75,6 +75,7 @@ const EMF_SAT     = 0.08;
 // ═══════════════════════════════════════════════════════════════════════════
 const SIM_SCALE  = 0.10;    // 1 sim-unit = 10 cm in VR
 const LOOP_VR_Y  = 0.90;    // loop plane sits at 90 cm above floor
+const LOOP_VR_Z  = -0.80;   // loop offset forward so player isn't inside it
 
 // Desktop auto-animate (preview without headset)
 const ANIM_CENTER = 4.5;
@@ -161,7 +162,7 @@ const discMesh = new THREE.Mesh(
   discMat
 );
 discMesh.rotation.x = -Math.PI/2;
-discMesh.position.y = LOOP_VR_Y + 0.001;
+discMesh.position.set(0, LOOP_VR_Y + 0.001, LOOP_VR_Z);
 scene.add(discMesh);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -169,11 +170,11 @@ scene.add(discMesh);
 // ═══════════════════════════════════════════════════════════════════════════
 const loopMat = new THREE.MeshBasicMaterial({ color:0x4fc3f7 });
 (function(){
-  const h=LOOP_HALF*SIM_SCALE, y=LOOP_VR_Y;
+  const h=LOOP_HALF*SIM_SCALE, y=LOOP_VR_Y, oz=LOOP_VR_Z;
   const corners=[
-    new THREE.Vector3(-h,y,-h), new THREE.Vector3(h,y,-h),
-    new THREE.Vector3(h,y,h),  new THREE.Vector3(-h,y,h),
-    new THREE.Vector3(-h,y,-h)
+    new THREE.Vector3(-h,y,-h+oz), new THREE.Vector3(h,y,-h+oz),
+    new THREE.Vector3(h,y,h+oz),  new THREE.Vector3(-h,y,h+oz),
+    new THREE.Vector3(-h,y,-h+oz)
   ];
   const R=0.006, SEG=8;
   for(let i=0;i<corners.length-1;i++){
@@ -269,7 +270,7 @@ const panelMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.52, 0.26),
   new THREE.MeshBasicMaterial({ map:panelTex, transparent:true, side:THREE.DoubleSide })
 );
-panelMesh.position.set(0, LOOP_VR_Y + 0.48, -0.52);
+panelMesh.position.set(0, LOOP_VR_Y + 0.48, LOOP_VR_Z - 0.52);
 scene.add(panelMesh);
 
 function rr(ctx,x,y,w,h,r) {
@@ -428,7 +429,7 @@ function setArrow(idx, sx, sz, bx, by, bz) {
   }
   // Convert sim coords → VR meters
   const sc=SIM_SCALE;
-  const wx=sx*sc, wy=LOOP_VR_Y+0.001, wz=sz*sc;
+  const wx=sx*sc, wy=LOOP_VR_Y+0.001, wz=sz*sc+LOOP_VR_Z;
   const len=(mag/(mag+REF_FIELD)) * MAX_ARROW * 2 * sc;
   const ux=bx/mag, uy=by/mag, uz=bz/mag;
   const ex=wx+ux*len, ey=wy+uy*len, ez=wz+uz*len;
@@ -484,7 +485,7 @@ function updateMarkers(dt) {
     const t=(markerPhase + m/N_MARKERS) % 1;
     const {x,z,tx:rawTx,tz:rawTz}=loopPosDir(t);
     const dir=emfSmoothed>=0?-1:1;
-    markerMeshes[m].position.set(x, LOOP_VR_Y+0.012, z);
+    markerMeshes[m].position.set(x, LOOP_VR_Y+0.012, z+LOOP_VR_Z);
     markerMeshes[m].quaternion.setFromUnitVectors(_fromVec,
       _toVec.set(rawTx*dir, 0, rawTz*dir).normalize());
   }
@@ -555,7 +556,7 @@ renderer.setAnimationLoop(function(ts) {
     // Convert VR meters → sim coordinates
     magnetX = _gripPos.x / SIM_SCALE;
     magnetY = (_gripPos.y - LOOP_VR_Y) / SIM_SCALE;
-    magnetZ = _gripPos.z / SIM_SCALE;
+    magnetZ = (_gripPos.z - LOOP_VR_Z) / SIM_SCALE;
 
     // Soft singularity guard: keep magnet away from loop plane when near axis
     if(Math.abs(magnetY) < 0.4) {
@@ -579,7 +580,7 @@ renderer.setAnimationLoop(function(ts) {
   magnetGroup.position.set(
     magnetX * SIM_SCALE,
     magnetY * SIM_SCALE + LOOP_VR_Y,
-    magnetZ * SIM_SCALE
+    magnetZ * SIM_SCALE + LOOP_VR_Z
   );
 
   // Fade magnet when very close to loop plane (keeps arrows readable)
