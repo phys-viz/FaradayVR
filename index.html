@@ -65,7 +65,7 @@ const MAX_ARROW   = 0.65;
 const REF_FIELD   = 0.025;
 const ARROW_HEAD  = 0.25;
 const N_MARKERS   = 8;
-const EMF_SPEED_K = 0.9;
+const EMF_SPEED_K = 0.3;
 const EMF_THRESH  = 0.003;
 const EMF_SAT     = 0.08;
 
@@ -230,6 +230,7 @@ sMesh.position.y = -0.02625;
 magnetGroup.add(nMesh, sMesh);
 
 // N / S canvas labels
+const labelMeshes = [];
 (function(){
   function makeLabel(text) {
     const c=document.createElement('canvas'); c.width=64; c.height=64;
@@ -247,6 +248,7 @@ magnetGroup.add(nMesh, sMesh);
   const nB=new THREE.Mesh(geo,makeLabel('N')); nB.position.set(0, 0.027,-0.020); nB.rotation.y=Math.PI;
   const sB=new THREE.Mesh(geo,makeLabel('S')); sB.position.set(0,-0.027,-0.020); sB.rotation.y=Math.PI;
   magnetGroup.add(nF,sF,nB,sB);
+  labelMeshes.push(nF,sF,nB,sB); // [0]=nF,[1]=sF,[2]=nB,[3]=sB
 })();
 scene.add(magnetGroup);
 
@@ -656,6 +658,11 @@ renderer.setAnimationLoop(function(ts) {
             magnetFlipped = !magnetFlipped;
             northMat.color.setHex(magnetFlipped ? 0x3366cc : 0xcc3333);
             southMat.color.setHex(magnetFlipped ? 0xcc3333 : 0x3366cc);
+            // Swap N/S label Y positions: [0]=nFront,[1]=sFront,[2]=nBack,[3]=sBack
+            const ny =  (magnetFlipped ? -1 : 1) * 0.027;
+            const sy = -(magnetFlipped ? -1 : 1) * 0.027;
+            labelMeshes[0].position.y = ny; labelMeshes[2].position.y = ny;
+            labelMeshes[1].position.y = sy; labelMeshes[3].position.y = sy;
             // Reset EMF window on flip
             wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
           }
