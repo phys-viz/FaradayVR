@@ -65,7 +65,7 @@ const MAX_ARROW   = 0.65;
 const REF_FIELD   = 0.025;
 const ARROW_HEAD  = 0.25;
 const N_MARKERS   = 8;
-const EMF_SPEED_K = 0.3;
+const EMF_SPEED_K = 0.08;
 const EMF_THRESH  = 0.003;
 const EMF_SAT     = 0.08;
 
@@ -347,7 +347,8 @@ function drawPanel() {
       pCtx.fillText('MAGNET', 24, 68);
       pCtx.fillStyle='#b8ccd8';
       pCtx.font="bold 18px 'Rajdhani', sans-serif";
-      pCtx.fillText(increasing ? 'Moving toward loop  ↓' : 'Moving away from loop  ↑', 24, 88);
+      const towardLoop = magnetFlipped ? !increasing : increasing;
+      pCtx.fillText(towardLoop ? 'Moving toward loop  ↓' : 'Moving away from loop  ↑', 24, 88);
 
       // Step 2: Flux
       pCtx.fillStyle='#69f0ae';
