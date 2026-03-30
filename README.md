@@ -6,43 +6,49 @@ Designed and developed by Anthony Danese, high school physics teacher.
 
 ## What it does
 
-Students move a magnetic dipole through a conducting loop and observe the induced EMF and current in real time. A floating panel displays a Lenz's Law breakdown — showing flux change direction, induced current direction, and the opposing force — so students can connect the qualitative reasoning to what they see in the scene. A freeze mechanic lets students pause the field snapshot and examine the flux state at any moment.
+Students hold a bar magnet (right controller) and move it through a conducting loop floating in space in front of them. A 7×7 grid of magnetic field arrows updates in real time as the magnet moves. A lazy-follow floating panel displays a Lenz's Law breakdown — flux change direction, induced B direction, and induced current direction — in plain language. A freeze mechanic lets students snapshot the entire field state and examine it hands-free, with a full qualitative breakdown appearing on the panel.
 
 ## Features
 
-- Magnetic dipole with real-time field line visualization
-- Conducting loop with induced EMF and current readout
-- Freeze / pause mechanic to snapshot the field at any moment
-- Lazy-follow floating panel with Lenz's Law breakdown
-- Induced B field arrow showing opposition direction
-- Field arrow grid (9×9) across the loop plane
-- Visibility toggles for field components
+- Bar magnet attached to right controller — full 3D freedom of movement
+- 7×7 magnetic field arrow grid across the loop plane, color-coded by field direction
+- Conducting loop with live induced current markers showing direction and magnitude
+- Loop glow disc that tracks flux magnitude and direction
+- Freeze mechanic — snapshots magnet position, field, current, and panel simultaneously
+- Smooth magnet return to controller on unfreeze (0.5s lerp)
+- Lazy-follow floating panel, always in front of the player at reading height
+- Active panel: flux direction + current direction + EMF strength bar
+- Frozen panel: full Lenz's Law breakdown — magnet motion → flux → induced B → induced current
+- Polarity flip with correct N/S label and field response
+- Haptic feedback proportional to EMF magnitude
+- Desktop preview mode with auto-animating magnet (no headset required)
 
 ## Controls
 
 | Action | Control |
 |---|---|
-| Move magnet | Grip (right controller) + move |
-| Freeze field snapshot | A button (right controller) |
-| Resume | A button (right controller) again |
-| Toggle field arrow visibility | B button (right controller) |
-| Spin scene | Grip button + move controller |
-| Walk / strafe | Left thumbstick |
-| Snap turn | Right thumbstick left/right |
+| Move magnet | Right controller — move freely |
+| Freeze field snapshot | Index trigger (right controller) |
+| Unfreeze / resume | Index trigger (right controller) again |
+| Flip magnet polarity | Button A (right controller) |
 
 ## How to use
 
 1. Open your Meta Quest browser and navigate to the live sim
 2. Tap **Enter VR**
-3. Grab the magnet and move it toward or through the loop
-4. Watch the EMF readout and Lenz's Law panel respond
-5. Press A to freeze the field and examine the flux state
+3. Hold the right controller — this is your magnet
+4. Move the magnet toward and through the loop
+5. Watch the field arrows, current markers, and panel respond
+6. Press the index trigger to freeze the snapshot and read the Lenz's Law breakdown
+7. Press the index trigger again to resume — the magnet smoothly returns to your hand
 
 **Live sim:** https://phys-viz.github.io/FaradayVR/
 
 ## Pedagogical context
 
-This simulation is designed to help students build qualitative intuition for Faraday's Law before working with quantitative flux calculations. The Lenz's Law panel is intentionally explicit — giving students precise language to describe what they observe rather than guessing. It is part of a suite of VR simulations for introductory electromagnetism.
+This simulation is designed to help students build qualitative intuition for Faraday's Law before working with quantitative flux calculations. The freeze mechanic is the core pedagogical affordance — students make a deliberate gesture to pause, look at the field state, and read the causal chain: what the magnet is doing, how the flux is changing, what the induced field must do to oppose that change, and which way the current flows. The Lenz's Law panel uses precise language intentionally, giving students the vocabulary to describe what they observe rather than paraphrasing it.
+
+This simulation is part of a suite of VR simulations for introductory electromagnetism hosted at [phys-viz.github.io](https://phys-viz.github.io).
 
 ## Tech stack
 
