@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -32,21 +32,39 @@ const VRButton = {
       return btn;
     }
     let currentSession = null;
-    navigator.xr.isSessionSupported('immersive-vr').then(supported => {
-      btn.textContent = supported ? 'ENTER VR' : 'VR NOT SUPPORTED';
-      btn.disabled = !supported;
-    });
-    btn.addEventListener('click', () => {
+    const setButtonState = (label, disabled = false) => {
+      btn.textContent = label;
+      btn.disabled = disabled;
+    };
+    navigator.xr.isSessionSupported('immersive-vr')
+      .then(supported => {
+        setButtonState(supported ? 'ENTER VR' : 'VR NOT SUPPORTED', !supported);
+      })
+      .catch(err => {
+        console.error('WebXR support check failed:', err);
+        setButtonState('VR CHECK FAILED', true);
+      });
+    btn.addEventListener('click', async () => {
       if (!currentSession) {
-        navigator.xr.requestSession('immersive-vr', {
-          optionalFeatures:['local-floor','bounded-floor','hand-tracking']
-        }).then(session => {
-          renderer.xr.setSession(session);
-          btn.textContent = 'EXIT VR';
+        btn.disabled = true;
+        try {
+          const session = await navigator.xr.requestSession('immersive-vr', {
+            optionalFeatures:['local-floor','bounded-floor','hand-tracking']
+          });
+          await renderer.xr.setSession(session);
           currentSession = session;
-          session.addEventListener('end', () => { currentSession = null; btn.textContent = 'ENTER VR'; });
-        });
-      } else { currentSession.end(); }
+          setButtonState('EXIT VR');
+          session.addEventListener('end', () => {
+            currentSession = null;
+            setButtonState('ENTER VR');
+          });
+        } catch (err) {
+          console.error('Failed to start VR session:', err);
+          setButtonState('ENTER VR');
+        }
+      } else {
+        currentSession.end();
+      }
     });
     return btn;
   }
@@ -55,12 +73,12 @@ const VRButton = {
 <script>
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  PHYSICS CONSTANTS  (same sim-unit system as desktop: LOOP_HALF = 3.0)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// PHYSICS CONSTANTS (same sim - unit system as desktop: LOOP_HALF = 3.0)
+// -----------------------------------------------------------------------------
 const LOOP_HALF   = 3.0;
-const DISP_GRID_N = 7;          // 7×7 arrow grid
-const PHI_GRID_N  = 13;         // 13×13 flux integration
+const DISP_GRID_N = 7;          // 7x7 arrow grid
+const PHI_GRID_N  = 13;         // 13x13 flux integration
 const MAX_ARROW   = 0.65;
 const REF_FIELD   = 0.025;
 const ARROW_HEAD  = 0.25;
@@ -69,41 +87,41 @@ const EMF_SPEED_K = 0.08;
 const EMF_THRESH  = 0.003;
 const EMF_SAT     = 0.08;
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  VR DISPLAY SCALE
-//  Sim coords  ──(×SIM_SCALE)──▶  VR meters, offset by LOOP_VR_Y on Y
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// VR DISPLAY SCALE
+// Sim coords - - (xSIM_SCALE) - - > VR meters, offset by LOOP_VR_Y on Y
+// -----------------------------------------------------------------------------
 const SIM_SCALE  = 0.10;    // 1 sim-unit = 10 cm in VR
 const LOOP_VR_Y  = 0.90;    // loop plane sits at 90 cm above floor
 const LOOP_VR_Z  = -0.80;   // loop offset forward so player isn't inside it
 
-// Desktop auto-animate (preview without headset)
+// Desktop auto - animate (preview without headset)
 const ANIM_CENTER = 4.5;
 const ANIM_AMP    = 2.0;
 const ANIM_SPEED  = 0.35;
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  STATE
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// STATE
+// -----------------------------------------------------------------------------
 let magnetX=0, magnetY=4.0, magnetZ=0;
 let magnetStrength=1.0, magnetFlipped=false;
 let emf=0, emfSmoothed=0, markerPhase=0, animateT=0;
-const EMF_SMOOTH     = 0.12;            // lower = more smoothing (0.0–1.0)
+const EMF_SMOOTH     = 0.12;            // lower = more smoothing (0.0-1.0)
 const HAPTIC_THRESH  = EMF_SAT * 0.25; // haptics only above 25% of saturation
 const HAPTIC_MAX_INT = 0.45;            // never pulse harder than this
 let prevTs=null, isPresenting=false;
 
-// ── Freeze state ──────────────────────────────────────────────────────────
+// - Freeze state -
 let frozen       = false;          // are we currently frozen?
 let frozenMagX   = 0, frozenMagY = 4.0, frozenMagZ = 0;  // world-space freeze pos
 
-// ── Unfreeze lerp ─────────────────────────────────────────────────────────
+// - Unfreeze lerp -
 let lerpActive   = false;          // lerping magnet back to controller?
-let lerpT        = 0;              // 0→1 over LERP_DUR seconds
+let lerpT        = 0;              // 0->1 over LERP_DUR seconds
 const LERP_DUR   = 0.5;
 let lerpStartX   = 0, lerpStartY  = 4.0, lerpStartZ = 0;
 
-// ── Panel lazy-follow ─────────────────────────────────────────────────────
+// - Panel lazy - follow -
 const PANEL_DIST    = 1.2;         // metres in front of player
 const PANEL_DROP    = 0.22;        // metres below eye level
 const PANEL_FOLLOW  = 0.015;       // lerp speed per frame (0=frozen, 1=instant)
@@ -112,19 +130,19 @@ const _camFwd       = new THREE.Vector3();
 const _xrCamPos     = new THREE.Vector3();
 const _xrCamQuat    = new THREE.Quaternion();
 
-// ── Button edge-detection ─────────────────────────────────────────────────
+// - Button edge - detection -
 let prevTrigger = false;           // index trigger (freeze)
 let prevBtnA    = false;           // button A (flip polarity)
 
-// Windowed finite-difference EMF (for live VR controller movement)
+// Windowed finite - difference EMF (for live VR controller movement)
 const W_SIZE = 12;
 const wPhi   = new Float32Array(W_SIZE);
 const wTs    = new Float32Array(W_SIZE);
 let   wIdx   = 0, wFull = false;
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  RENDERER
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// RENDERER
+// -----------------------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -142,9 +160,9 @@ renderer.xr.addEventListener('sessionend', () => {
   document.getElementById('hint').style.display = 'block';
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  SCENE / CAMERA
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// SCENE / CAMERA
+// -----------------------------------------------------------------------------
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x060a10);
 scene.add(new THREE.AmbientLight(0xffffff, 1.0));
@@ -161,9 +179,9 @@ function updateCamera() {
 }
 updateCamera();
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  FLOOR & ENVIRONMENT
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// FLOOR & ENVIRONMENT
+// -----------------------------------------------------------------------------
 scene.add(new THREE.GridHelper(10, 50, 0x0a1e30, 0x060c16));
 
 // Faint floor plane
@@ -174,9 +192,9 @@ const floorMesh = new THREE.Mesh(
 floorMesh.rotation.x = -Math.PI/2;
 scene.add(floorMesh);
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  LOOP GLOW DISC  (opacity + tint tracks flux magnitude)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// LOOP GLOW DISC (opacity + tint tracks flux magnitude)
+// -----------------------------------------------------------------------------
 const discMat = new THREE.MeshBasicMaterial({
   color:0x69f0ae, transparent:true, opacity:0.04, side:THREE.DoubleSide
 });
@@ -188,9 +206,9 @@ discMesh.rotation.x = -Math.PI/2;
 discMesh.position.set(0, LOOP_VR_Y + 0.001, LOOP_VR_Z);
 scene.add(discMesh);
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  SQUARE WIRE LOOP  (VR scale)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// SQUARE WIRE LOOP (VR scale)
+// -----------------------------------------------------------------------------
 const loopMat = new THREE.MeshBasicMaterial({ color:0x4fc3f7 });
 (function(){
   const h=LOOP_HALF*SIM_SCALE, y=LOOP_VR_Y, oz=LOOP_VR_Z;
@@ -216,9 +234,9 @@ const loopMat = new THREE.MeshBasicMaterial({ color:0x4fc3f7 });
   });
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  MAGNET  (attached to right controller grip in VR)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// MAGNET (attached to right controller grip in VR)
+// -----------------------------------------------------------------------------
 const magnetGroup = new THREE.Group();
 const northMat = new THREE.MeshBasicMaterial({ color:0xcc3333, transparent:true, opacity:1.0 });
 const southMat = new THREE.MeshBasicMaterial({ color:0x3366cc, transparent:true, opacity:1.0 });
@@ -252,9 +270,9 @@ const labelMeshes = [];
 })();
 scene.add(magnetGroup);
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  B FIELD ARROWS  (7×7 line-segment grid at loop plane)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// B FIELD ARROWS (7x7 line - segment grid at loop plane)
+// -----------------------------------------------------------------------------
 const arrowCount  = DISP_GRID_N * DISP_GRID_N;
 const arrowPosArr = new Float32Array(arrowCount * 18);
 const arrowColArr = new Float32Array(arrowCount * 18);
@@ -265,9 +283,9 @@ const arrowLines  = new THREE.LineSegments(arrowGeo,
   new THREE.LineBasicMaterial({ vertexColors:true }));
 scene.add(arrowLines);
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  CURRENT MARKERS  (8 magenta 3-D arrows circling the loop)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// CURRENT MARKERS (8 magenta 3 - D arrows circling the loop)
+// -----------------------------------------------------------------------------
 const SHAFT_R=0.007, SHAFT_LEN=0.055, CONE_R=0.015, CONE_LEN=0.030;
 const markerMat   = new THREE.MeshBasicMaterial({ color:0xff44cc, transparent:true, opacity:1.0 });
 const markerGroup = new THREE.Group();
@@ -283,14 +301,16 @@ for(let m=0; m<N_MARKERS; m++){
   g.add(shaft,cone); markerGroup.add(g); markerMeshes.push(g);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  FLOATING INFO PANEL  (canvas texture, billboards toward headset)
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// FLOATING INFO PANEL (canvas texture, billboards toward headset)
+// -----------------------------------------------------------------------------
 const PANEL_W=512, PANEL_H=320;
 const panelCanvas = document.createElement('canvas');
 panelCanvas.width=PANEL_W; panelCanvas.height=PANEL_H;
 const pCtx = panelCanvas.getContext('2d');
 const panelTex = new THREE.CanvasTexture(panelCanvas);
+let panelBarGradient = null;
+let lastPanelState = '';
 const panelMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.52, 0.33),
   new THREE.MeshBasicMaterial({ map:panelTex, transparent:true, side:THREE.DoubleSide })
@@ -306,13 +326,21 @@ function rr(ctx,x,y,w,h,r) {
   ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
 }
 
-function drawPanel() {
+function drawPanel(force = false) {
+  const panelState = [
+    frozen ? 1 : 0,
+    magnetFlipped ? 1 : 0,
+    Math.round(emfSmoothed * 1000)
+  ].join('|');
+  if(!force && panelState === lastPanelState) return;
+  lastPanelState = panelState;
+
   const W=PANEL_W, H=PANEL_H;
   pCtx.clearRect(0,0,W,H);
 
-  // Background
+ // Background
   pCtx.fillStyle='rgba(5,11,19,0.95)'; rr(pCtx,0,0,W,H,18); pCtx.fill();
-  // Border: amber when frozen, dark blue when live
+ // Border: amber when frozen, dark blue when live
   pCtx.strokeStyle = frozen ? '#ffa000' : '#1a3050';
   pCtx.lineWidth = frozen ? 3 : 2;
   rr(pCtx,1,1,W-2,H-2,18); pCtx.stroke();
@@ -320,11 +348,11 @@ function drawPanel() {
   pCtx.textAlign='center';
 
   if(frozen) {
-    // ── FROZEN STATE: full Lenz's law breakdown ─────────────────────────
-    // Header with FROZEN badge
+ // - FROZEN STATE: full Lenz's law breakdown -
+ // Header with FROZEN badge
     pCtx.fillStyle='#ffa000';
     pCtx.font="bold 22px 'Share Tech Mono', monospace";
-    pCtx.fillText("FARADAY'S LAW  ·  ❚❚ FROZEN", W/2, 34);
+    pCtx.fillText("FARADAY'S LAW  ·  || FROZEN", W/2, 34);
 
     pCtx.strokeStyle='#3a2800'; pCtx.lineWidth=1;
     pCtx.beginPath(); pCtx.moveTo(18,46); pCtx.lineTo(W-18,46); pCtx.stroke();
@@ -338,9 +366,9 @@ function drawPanel() {
       pCtx.fillText('Magnet is stationary', W/2, 100);
       pCtx.fillStyle='#3a2800';
       pCtx.font="13px 'Share Tech Mono', monospace";
-      pCtx.fillText('No changing flux — no EMF', W/2, 126);
+      pCtx.fillText('No changing flux - no EMF', W/2, 126);
     } else {
-      // Step 1: Magnet motion
+ // Step 1: Magnet motion
       pCtx.fillStyle='#7aabcf';
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.textAlign='left';
@@ -350,21 +378,21 @@ function drawPanel() {
       const towardLoop = magnetFlipped ? !increasing : increasing;
       pCtx.fillText(towardLoop ? 'Moving toward loop  ↓' : 'Moving away from loop  ↑', 24, 88);
 
-      // Step 2: Flux
+ // Step 2: Flux
       pCtx.fillStyle='#69f0ae';
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.fillText('FLUX', 24, 114);
       pCtx.font="bold 18px 'Rajdhani', sans-serif";
       pCtx.fillText(increasing ? 'Upward flux INCREASING' : 'Upward flux DECREASING', 24, 134);
 
-      // Step 3: Induced B
+ // Step 3: Induced B
       pCtx.fillStyle='#b388ff';
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.fillText('INDUCED B  (opposes change)', 24, 160);
       pCtx.font="bold 18px 'Rajdhani', sans-serif";
       pCtx.fillText(increasing ? 'Points downward  ↓' : 'Points upward  ↑', 24, 180);
 
-      // Step 4: Current
+ // Step 4: Current
       pCtx.fillStyle='#ff44cc';
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.fillText('INDUCED CURRENT', 24, 206);
@@ -378,7 +406,7 @@ function drawPanel() {
     }
 
   } else {
-    // ── ACTIVE STATE: minimal ───────────────────────────────────────────
+ // - ACTIVE STATE: minimal -
     pCtx.fillStyle='#4fc3f7';
     pCtx.font="bold 22px 'Share Tech Mono', monospace";
     pCtx.fillText("FARADAY'S LAW", W/2, 34);
@@ -394,7 +422,7 @@ function drawPanel() {
       pCtx.fillText('Move the magnet through the loop', W/2, 108);
       pCtx.fillStyle='#1a3050';
       pCtx.font="12px 'Share Tech Mono', monospace";
-      pCtx.fillText('Trigger = freeze  ·  A = flip polarity', W/2, 136);
+      pCtx.fillText('Trigger = freeze · A = flip polarity', W/2, 136);
     } else {
       const increasing = -emfSmoothed > 0;
 
@@ -406,13 +434,17 @@ function drawPanel() {
       pCtx.font="bold 22px 'Rajdhani', sans-serif";
       pCtx.fillText('Current: ' + (increasing ? 'clockwise' : 'counter-clockwise'), W/2, 126);
 
-      // EMF bar
+ // EMF bar
       const bX=56, bY=152, bW=400, bH=14;
       pCtx.fillStyle='#07111c'; pCtx.fillRect(bX,bY,bW,bH);
       const fill = Math.min(1.0, Math.abs(emfSmoothed)/EMF_SAT) * bW;
-      const grad = pCtx.createLinearGradient(bX,0,bX+bW,0);
-      grad.addColorStop(0,'#0d2040'); grad.addColorStop(0.5,'#4fc3f7'); grad.addColorStop(1,'#ffd54f');
-      pCtx.fillStyle=grad; pCtx.fillRect(bX,bY,fill,bH);
+      if(!panelBarGradient) {
+        panelBarGradient = pCtx.createLinearGradient(bX,0,bX+bW,0);
+        panelBarGradient.addColorStop(0,'#0d2040');
+        panelBarGradient.addColorStop(0.5,'#4fc3f7');
+        panelBarGradient.addColorStop(1,'#ffd54f');
+      }
+      pCtx.fillStyle=panelBarGradient; pCtx.fillRect(bX,bY,fill,bH);
       pCtx.strokeStyle='#1a3050'; pCtx.lineWidth=1; pCtx.strokeRect(bX,bY,bW,bH);
       pCtx.fillStyle='#3a5570';
       pCtx.font="11px 'Share Tech Mono', monospace";
@@ -423,11 +455,11 @@ function drawPanel() {
   panelTex.needsUpdate = true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  WEBXR CONTROLLERS
-//  Index 0 = right hand (Quest convention).
-//  Both grips added to scene; only grip[0] drives the magnet.
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// WEBXR CONTROLLERS
+// Index 0 = right hand (Quest convention).
+// Both grips added to scene; only grip[0] drives the magnet.
+// -----------------------------------------------------------------------------
 const grips = [
   renderer.xr.getControllerGrip(0),
   renderer.xr.getControllerGrip(1)
@@ -443,12 +475,12 @@ renderer.xr.getController(0).add(
 );
 scene.add(renderer.xr.getController(0));
 
-// ─── Determine which grip index is 'right' each frame ───────────────────
+// - Determine which grip index is 'right' each frame -
 let rightGripIdx = 0;   // default; updated below
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  PHYSICS
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// PHYSICS
+// -----------------------------------------------------------------------------
 function dipoleB(px, pz, MY_arg) {
   const my = (MY_arg !== undefined) ? MY_arg : magnetY;
   const M  = magnetStrength * (magnetFlipped ? -1 : 1);
@@ -469,7 +501,7 @@ function computePhi(MY_arg) {
   return phi;
 }
 
-// Manual (VR) — windowed finite difference
+// Manual (VR) - windowed finite difference
 function updateEmfManual(phi, ts) {
   wPhi[wIdx]=phi; wTs[wIdx]=ts;
   const oldIdx=(wIdx+1)%W_SIZE;
@@ -482,7 +514,7 @@ function updateEmfManual(phi, ts) {
   if(wIdx===0) wFull=true;
 }
 
-// Auto (desktop preview) — analytical derivative
+// Auto (desktop preview) - analytical derivative
 function computeEmfAuto() {
   const dYdt = ANIM_AMP * 2*Math.PI * ANIM_SPEED * Math.cos(2*Math.PI*ANIM_SPEED*animateT);
   const eps=0.1;
@@ -490,9 +522,9 @@ function computeEmfAuto() {
   return -(dPhidY * dYdt);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ARROW RENDERING
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// ARROW RENDERING
+// -----------------------------------------------------------------------------
 function arrowColor(by) {
   const t=Math.tanh(by/(REF_FIELD*1.2));
   if(t>=0) return { r:0.85+0.15*t, g:0.35+0.30*(1-t), b:0.10 };
@@ -508,7 +540,7 @@ function setArrow(idx, sx, sz, bx, by, bz) {
     for(let k=0;k<18;k++) arrowColArr[base+k]=0.1;
     return;
   }
-  // Convert sim coords → VR meters
+// Convert sim coords - > VR meters
   const sc=SIM_SCALE;
   const wx=sx*sc, wy=LOOP_VR_Y+0.001, wz=sz*sc+LOOP_VR_Z;
   const len=(mag/(mag+REF_FIELD)) * MAX_ARROW * 2 * sc;
@@ -542,9 +574,9 @@ function updateArrows() {
   arrowGeo.attributes.color.needsUpdate=true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  CURRENT MARKERS
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// CURRENT MARKERS
+// -----------------------------------------------------------------------------
 function loopPosDir(t) {
   const s=((t%1)+1)%1, dist=s*4, L=LOOP_HALF*2, sc=SIM_SCALE;
   if(dist<1){ const u=dist;   return {x:(-LOOP_HALF+u*L)*sc, z:-LOOP_HALF*sc, tx:1,  tz:0}; }
@@ -573,32 +605,59 @@ function updateMarkers(dt) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  HAPTICS
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// HAPTICS
+// -----------------------------------------------------------------------------
 function pulseHaptics(intensity) {
   const session=renderer.xr.getSession();
   if(!session) return;
+  const clamped = Math.min(1, intensity);
   session.inputSources.forEach(src => {
-    if(src.handedness==='right' && src.gamepad?.hapticActuators?.length)
-      src.gamepad.hapticActuators[0].pulse(Math.min(1, intensity), 16);
+    if(src.handedness !== 'right' || !src.gamepad) return;
+    const actuator = src.gamepad.hapticActuators?.[0] ?? src.gamepad.vibrationActuator;
+    if(actuator?.pulse) {
+      actuator.pulse(clamped, 16);
+    } else if(actuator?.playEffect) {
+      actuator.playEffect('dual-rumble', {
+        duration:16,
+        strongMagnitude:clamped,
+        weakMagnitude:clamped
+      }).catch(() => {});
+    }
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ORBIT + ZOOM (desktop only)
-// ═══════════════════════════════════════════════════════════════════════════
-let isOrbiting=false, lastMX=0, lastMY=0;
-renderer.domElement.addEventListener('mousedown', e=>{
-  if(e.button===0){ isOrbiting=true; lastMX=e.clientX; lastMY=e.clientY; }
+// -----------------------------------------------------------------------------
+// ORBIT + ZOOM (desktop only)
+// -----------------------------------------------------------------------------
+let isOrbiting=false, lastMX=0, lastMY=0, orbitPointerId=null;
+renderer.domElement.style.touchAction = 'none';
+renderer.domElement.addEventListener('pointerdown', e=>{
+  if(e.button !== 0 || isPresenting) return;
+  isOrbiting = true;
+  orbitPointerId = e.pointerId;
+  lastMX = e.clientX;
+  lastMY = e.clientY;
+  renderer.domElement.setPointerCapture(e.pointerId);
 });
-window.addEventListener('mousemove', e=>{
-  if(!isOrbiting) return;
+renderer.domElement.addEventListener('pointermove', e=>{
+  if(!isOrbiting || e.pointerId !== orbitPointerId) return;
   camTheta -= (e.clientX-lastMX)*0.008;
   camPhi = Math.max(0.05, Math.min(Math.PI*0.90, camPhi+(e.clientY-lastMY)*0.008));
-  updateCamera(); lastMX=e.clientX; lastMY=e.clientY;
+  updateCamera();
+  lastMX = e.clientX;
+  lastMY = e.clientY;
 });
-window.addEventListener('mouseup', ()=>{ isOrbiting=false; });
+const stopOrbit = e => {
+  if(e && orbitPointerId !== null && e.pointerId !== orbitPointerId) return;
+  if(orbitPointerId !== null && renderer.domElement.hasPointerCapture(orbitPointerId)) {
+    renderer.domElement.releasePointerCapture(orbitPointerId);
+  }
+  isOrbiting = false;
+  orbitPointerId = null;
+};
+renderer.domElement.addEventListener('pointerup', stopOrbit);
+renderer.domElement.addEventListener('pointercancel', stopOrbit);
 renderer.domElement.addEventListener('wheel', e=>{
   camRadius=Math.max(1.5, Math.min(8.0, camRadius+e.deltaY*0.004));
   updateCamera(); e.preventDefault();
@@ -610,21 +669,26 @@ window.addEventListener('resize', ()=>{
   camera.updateProjectionMatrix();
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  TEMP VECTORS
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// TEMP VECTORS
+// -----------------------------------------------------------------------------
 const _gripPos = new THREE.Vector3();
 const _headPos = new THREE.Vector3();
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ANIMATION LOOP
-// ═══════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// ANIMATION LOOP
+// -----------------------------------------------------------------------------
 renderer.setAnimationLoop(function(ts) {
   const dt = prevTs!==null ? Math.min((ts-prevTs)/1000, 0.05) : 0;
+  let framePhi = null;
+  const getFramePhi = () => {
+    if(framePhi === null) framePhi = computePhi(magnetY);
+    return framePhi;
+  };
   prevTs=ts;
 
   if(isPresenting) {
-    // ── Poll right controller input sources ───────────────────────────────
+ // - Poll right controller input sources -
     const session = renderer.xr.getSession();
     if(session) {
       session.inputSources.forEach((src, i) => {
@@ -633,38 +697,38 @@ renderer.setAnimationLoop(function(ts) {
         if(src.handedness === 'right' && src.gamepad) {
           const gp = src.gamepad;
 
-          // Index trigger (axes[3] or buttons[0]) — freeze toggle
+ // Index trigger (axes[3] or buttons[0]) - freeze toggle
           const trigVal  = gp.buttons[0]?.pressed ?? false;
           if(trigVal && !prevTrigger) {
             if(!frozen) {
-              // FREEZE — snap magnet to current sim position
+ // FREEZE - snap magnet to current sim position
               frozen     = true;
               lerpActive = false;
               frozenMagX = magnetX; frozenMagY = magnetY; frozenMagZ = magnetZ;
             } else {
-              // UNFREEZE — start lerp back to controller
+ // UNFREEZE - start lerp back to controller
               frozen     = false;
               lerpActive = true;
               lerpT      = 0;
               lerpStartX = magnetX; lerpStartY = magnetY; lerpStartZ = magnetZ;
-              // Reset EMF window so no phantom spike
+ // Reset EMF window so no phantom spike
               wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
             }
           }
           prevTrigger = trigVal;
 
-          // Button A (buttons[4] on Quest) — flip polarity
+ // Button A (buttons[4] on Quest) - flip polarity
           const btnA = gp.buttons[4]?.pressed ?? false;
           if(btnA && !prevBtnA) {
             magnetFlipped = !magnetFlipped;
             northMat.color.setHex(magnetFlipped ? 0x3366cc : 0xcc3333);
             southMat.color.setHex(magnetFlipped ? 0xcc3333 : 0x3366cc);
-            // Swap N/S label Y positions: [0]=nFront,[1]=sFront,[2]=nBack,[3]=sBack
+ // Swap N/S label Y positions: [0]=nFront,[1]=sFront,[2]=nBack,[3]=sBack
             const ny =  (magnetFlipped ? -1 : 1) * 0.027;
             const sy = -(magnetFlipped ? -1 : 1) * 0.027;
             labelMeshes[0].position.y = ny; labelMeshes[2].position.y = ny;
             labelMeshes[1].position.y = sy; labelMeshes[3].position.y = sy;
-            // Reset EMF window on flip
+ // Reset EMF window on flip
             wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
           }
           prevBtnA = btnA;
@@ -673,92 +737,92 @@ renderer.setAnimationLoop(function(ts) {
     }
 
     grips[rightGripIdx].getWorldPosition(_gripPos);
-    // Live controller sim coords (used for lerp target even while frozen)
+ // Live controller sim coords (used for lerp target even while frozen)
     const ctrlSimX = _gripPos.x / SIM_SCALE;
     const ctrlSimY = (_gripPos.y - LOOP_VR_Y) / SIM_SCALE;
     const ctrlSimZ = (_gripPos.z - LOOP_VR_Z) / SIM_SCALE;
 
     if(frozen) {
-      // Frozen — hold last snapped position, no EMF update
+ // Frozen - hold last snapped position, no EMF update
       magnetX = frozenMagX; magnetY = frozenMagY; magnetZ = frozenMagZ;
     } else if(lerpActive) {
-      // Lerping back to controller
+ // Lerping back to controller
       lerpT += dt / LERP_DUR;
       if(lerpT >= 1.0) { lerpT = 1.0; lerpActive = false; }
       const ease = lerpT * lerpT * (3 - 2*lerpT);  // smoothstep
       magnetX = lerpStartX + (ctrlSimX - lerpStartX) * ease;
       magnetY = lerpStartY + (ctrlSimY - lerpStartY) * ease;
       magnetZ = lerpStartZ + (ctrlSimZ - lerpStartZ) * ease;
-      // EMF suppressed during lerp — already reset on unfreeze
+ // EMF suppressed during lerp - already reset on unfreeze
     } else {
-      // Normal live tracking
+ // Normal live tracking
       magnetX = ctrlSimX; magnetY = ctrlSimY; magnetZ = ctrlSimZ;
     }
 
-    // Singularity guard
+ // Singularity guard
     if(Math.abs(magnetY) < 0.4) {
       const r = Math.sqrt(magnetX*magnetX + magnetZ*magnetZ);
       if(r < 2.0) magnetY = magnetY >= 0 ? 0.4 : -0.4;
     }
 
-    if(!frozen && !lerpActive) updateEmfManual(computePhi(magnetY), ts);
+    if(!frozen && !lerpActive) updateEmfManual(getFramePhi(), ts);
 
   } else {
-    // ── Desktop preview: auto-animate ────────────────────────────────────
+ // - Desktop preview: auto - animate -
     animateT += dt;
     magnetY = ANIM_CENTER + ANIM_AMP * Math.sin(2*Math.PI*ANIM_SPEED*animateT);
     emf = computeEmfAuto();
   }
 
 
-  // -- Smooth EMF: kills tremor noise, preserves intentional motion
+ // - - Smooth EMF: kills tremor noise, preserves intentional motion
   emfSmoothed += (emf - emfSmoothed) * EMF_SMOOTH;
-  // ── Position magnet mesh (sim coords → VR meters) ─────────────────────
+ // - Position magnet mesh (sim coords - VR meters) -
   magnetGroup.position.set(
     magnetX * SIM_SCALE,
     magnetY * SIM_SCALE + LOOP_VR_Y,
     magnetZ * SIM_SCALE + LOOP_VR_Z
   );
 
-  // Fade magnet when very close to loop plane (keeps arrows readable)
+ // Fade magnet when very close to loop plane (keeps arrows readable)
   const fadeAbs=Math.abs(magnetY);
   const fade = fadeAbs>=1.5 ? 1.0 : Math.max(0.15, (fadeAbs-0.5)/1.0);
   northMat.opacity = fade;
   southMat.opacity = fade;
 
-  // ── Amber loop wire when frozen ─────────────────────────────────────────
+ // - Amber loop wire when frozen -
   loopMat.color.setHex(frozen ? 0xffa000 : 0x4fc3f7);
 
-  // ── Update B arrows (skip if frozen) ─────────────────────────────────────
+ // - Update B arrows (skip if frozen) -
   if(!frozen) updateArrows();
 
-  // ── Update current markers ────────────────────────────────────────────
+ // - Update current markers -
   updateMarkers(dt);
 
-  // ── Update loop glow disc ─────────────────────────────────────────────
+ // - Update loop glow disc -
   if(!frozen) {
-    const phi   = computePhi(magnetY);
+    const phi = getFramePhi();
     const glowT = Math.min(1.0, Math.abs(phi) / 0.5);
     discMat.opacity = 0.02 + 0.13*glowT;
     if(phi >= 0) discMat.color.setRGB(0.35+0.3*glowT, 0.95, 0.55);
     else         discMat.color.setRGB(0.15, 0.45+0.1*glowT, 0.92);
   }
 
-  // ── Panel lazy-follow + billboard ───────────────────────────────────────
+ // - Panel lazy - follow + billboard -
   if(isPresenting) {
     const xrCam = renderer.xr.getCamera(camera);
     xrCam.getWorldPosition(_xrCamPos);
     xrCam.getWorldQuaternion(_xrCamQuat);
-    // Camera forward in world space
+ // Camera forward in world space
     _camFwd.set(0, 0, -1).applyQuaternion(_xrCamQuat);
     _camFwd.y = 0;
     if(_camFwd.lengthSq() < 0.001) _camFwd.set(0, 0, -1);
     _camFwd.normalize();
-    // Target: PANEL_DIST ahead, PANEL_DROP below eye
+ // Target: PANEL_DIST ahead, PANEL_DROP below eye
     _panelTarget.copy(_xrCamPos)
       .addScaledVector(_camFwd, PANEL_DIST);
     _panelTarget.y = _xrCamPos.y - PANEL_DROP;
-    // Lazy lerp toward target
+ // Lazy lerp toward target
     panelMesh.position.lerp(_panelTarget, PANEL_FOLLOW);
     panelMesh.lookAt(_xrCamPos);
   } else {
@@ -766,7 +830,7 @@ renderer.setAnimationLoop(function(ts) {
   }
   drawPanel();
 
-  // ── Haptics: higher threshold, gentler curve, hard cap ──────────────
+ // - Haptics: higher threshold, gentler curve, hard cap -
   if(isPresenting && Math.abs(emfSmoothed) > HAPTIC_THRESH) {
     const t = (Math.abs(emfSmoothed) - HAPTIC_THRESH) / (EMF_SAT - HAPTIC_THRESH);
     pulseHaptics(Math.min(HAPTIC_MAX_INT, t * HAPTIC_MAX_INT));
@@ -777,3 +841,4 @@ renderer.setAnimationLoop(function(ts) {
 </script>
 </body>
 </html>
+

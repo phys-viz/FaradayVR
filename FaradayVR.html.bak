@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Faraday's Law · VR</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@600;700&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#060a10; overflow:hidden; }
+  #hint {
+    position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    font-family:'Share Tech Mono',monospace; font-size:11px; color:#2a4060;
+    letter-spacing:2px; pointer-events:none; white-space:nowrap;
+  }
+  #vr-btn { position:absolute; bottom:24px; left:50%; transform:translateX(-50%); }
+</style>
+</head>
+<body>
+<div id="hint">ORBIT: DRAG · ZOOM: SCROLL · PREVIEW: AUTO-ANIMATING</div>
+<div id="vr-btn"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// Minimal inline VRButton (no external dependency)
+const VRButton = {
+  createButton(renderer) {
+    const btn = document.createElement('button');
+    btn.style.cssText = 'padding:12px 20px;border:1px solid #4fc3f7;border-radius:4px;background:rgba(4,8,16,0.85);color:#4fc3f7;font:12px "Share Tech Mono",monospace;letter-spacing:2px;cursor:pointer;';
+    if (!('xr' in navigator)) {
+      btn.textContent = 'WEBXR NOT AVAILABLE';
+      btn.disabled = true;
+      return btn;
+    }
+    let currentSession = null;
+    navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+      btn.textContent = supported ? 'ENTER VR' : 'VR NOT SUPPORTED';
+      btn.disabled = !supported;
+    });
+    btn.addEventListener('click', () => {
+      if (!currentSession) {
+        navigator.xr.requestSession('immersive-vr', {
+          optionalFeatures:['local-floor','bounded-floor','hand-tracking']
+        }).then(session => {
+          renderer.xr.setSession(session);
+          btn.textContent = 'EXIT VR';
+          currentSession = session;
+          session.addEventListener('end', () => { currentSession = null; btn.textContent = 'ENTER VR'; });
+        });
+      } else { currentSession.end(); }
+    });
+    return btn;
+  }
+};
+</script>
+<script>
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PHYSICS CONSTANTS  (same sim-unit system as desktop: LOOP_HALF = 3.0)
+// ═══════════════════════════════════════════════════════════════════════════
+const LOOP_HALF   = 3.0;
+const DISP_GRID_N = 7;          // 7×7 arrow grid
+const PHI_GRID_N  = 13;         // 13×13 flux integration
+const MAX_ARROW   = 0.65;
+const REF_FIELD   = 0.025;
+const ARROW_HEAD  = 0.25;
+const N_MARKERS   = 8;
+const EMF_SPEED_K = 0.08;
+const EMF_THRESH  = 0.003;
+const EMF_SAT     = 0.08;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  VR DISPLAY SCALE
+//  Sim coords  ──(×SIM_SCALE)──▶  VR meters, offset by LOOP_VR_Y on Y
+// ═══════════════════════════════════════════════════════════════════════════
+const SIM_SCALE  = 0.10;    // 1 sim-unit = 10 cm in VR
+const LOOP_VR_Y  = 0.90;    // loop plane sits at 90 cm above floor
+const LOOP_VR_Z  = -0.80;   // loop offset forward so player isn't inside it
+
+// Desktop auto-animate (preview without headset)
+const ANIM_CENTER = 4.5;
+const ANIM_AMP    = 2.0;
+const ANIM_SPEED  = 0.35;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════════════════════
+let magnetX=0, magnetY=4.0, magnetZ=0;
+let magnetStrength=1.0, magnetFlipped=false;
+let emf=0, emfSmoothed=0, markerPhase=0, animateT=0;
+const EMF_SMOOTH     = 0.12;            // lower = more smoothing (0.0–1.0)
+const HAPTIC_THRESH  = EMF_SAT * 0.25; // haptics only above 25% of saturation
+const HAPTIC_MAX_INT = 0.45;            // never pulse harder than this
+let prevTs=null, isPresenting=false;
+
+// ── Freeze state ──────────────────────────────────────────────────────────
+let frozen       = false;          // are we currently frozen?
+let frozenMagX   = 0, frozenMagY = 4.0, frozenMagZ = 0;  // world-space freeze pos
+
+// ── Unfreeze lerp ─────────────────────────────────────────────────────────
+let lerpActive   = false;          // lerping magnet back to controller?
+let lerpT        = 0;              // 0→1 over LERP_DUR seconds
+const LERP_DUR   = 0.5;
+let lerpStartX   = 0, lerpStartY  = 4.0, lerpStartZ = 0;
+
+// ── Panel lazy-follow ─────────────────────────────────────────────────────
+const PANEL_DIST    = 1.2;         // metres in front of player
+const PANEL_DROP    = 0.22;        // metres below eye level
+const PANEL_FOLLOW  = 0.015;       // lerp speed per frame (0=frozen, 1=instant)
+const _panelTarget  = new THREE.Vector3();
+const _camFwd       = new THREE.Vector3();
+const _xrCamPos     = new THREE.Vector3();
+const _xrCamQuat    = new THREE.Quaternion();
+
+// ── Button edge-detection ─────────────────────────────────────────────────
+let prevTrigger = false;           // index trigger (freeze)
+let prevBtnA    = false;           // button A (flip polarity)
+
+// Windowed finite-difference EMF (for live VR controller movement)
+const W_SIZE = 12;
+const wPhi   = new Float32Array(W_SIZE);
+const wTs    = new Float32Array(W_SIZE);
+let   wIdx   = 0, wFull = false;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RENDERER
+// ═══════════════════════════════════════════════════════════════════════════
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.getElementById('vr-btn').appendChild(VRButton.createButton(renderer));
+
+renderer.xr.addEventListener('sessionstart', () => {
+  isPresenting = true;
+  prevTs = null; wIdx = 0; wFull = false; emf = 0;
+  document.getElementById('hint').style.display = 'none';
+});
+renderer.xr.addEventListener('sessionend', () => {
+  isPresenting = false; prevTs = null;
+  document.getElementById('hint').style.display = 'block';
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SCENE / CAMERA
+// ═══════════════════════════════════════════════════════════════════════════
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060a10);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.01, 100);
+let camTheta=Math.PI*0.25, camPhi=Math.PI*0.30, camRadius=3.5;
+function updateCamera() {
+  camera.position.set(
+    camRadius * Math.sin(camPhi) * Math.sin(camTheta),
+    LOOP_VR_Y + camRadius * Math.cos(camPhi),
+    camRadius * Math.sin(camPhi) * Math.cos(camTheta)
+  );
+  camera.lookAt(0, LOOP_VR_Y, 0);
+}
+updateCamera();
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FLOOR & ENVIRONMENT
+// ═══════════════════════════════════════════════════════════════════════════
+scene.add(new THREE.GridHelper(10, 50, 0x0a1e30, 0x060c16));
+
+// Faint floor plane
+const floorMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(14, 14),
+  new THREE.MeshBasicMaterial({ color:0x040810, side:THREE.DoubleSide })
+);
+floorMesh.rotation.x = -Math.PI/2;
+scene.add(floorMesh);
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LOOP GLOW DISC  (opacity + tint tracks flux magnitude)
+// ═══════════════════════════════════════════════════════════════════════════
+const discMat = new THREE.MeshBasicMaterial({
+  color:0x69f0ae, transparent:true, opacity:0.04, side:THREE.DoubleSide
+});
+const discMesh = new THREE.Mesh(
+  new THREE.CircleGeometry(LOOP_HALF * SIM_SCALE * 1.08, 48),
+  discMat
+);
+discMesh.rotation.x = -Math.PI/2;
+discMesh.position.set(0, LOOP_VR_Y + 0.001, LOOP_VR_Z);
+scene.add(discMesh);
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SQUARE WIRE LOOP  (VR scale)
+// ═══════════════════════════════════════════════════════════════════════════
+const loopMat = new THREE.MeshBasicMaterial({ color:0x4fc3f7 });
+(function(){
+  const h=LOOP_HALF*SIM_SCALE, y=LOOP_VR_Y, oz=LOOP_VR_Z;
+  const corners=[
+    new THREE.Vector3(-h,y,-h+oz), new THREE.Vector3(h,y,-h+oz),
+    new THREE.Vector3(h,y,h+oz),  new THREE.Vector3(-h,y,h+oz),
+    new THREE.Vector3(-h,y,-h+oz)
+  ];
+  const R=0.006, SEG=8;
+  for(let i=0;i<corners.length-1;i++){
+    const a=corners[i], b=corners[i+1];
+    const dir=new THREE.Vector3().subVectors(b,a);
+    const len=dir.length();
+    const mid=new THREE.Vector3().addVectors(a,b).multiplyScalar(0.5);
+    const mesh=new THREE.Mesh(new THREE.CylinderGeometry(R,R,len,SEG), loopMat);
+    mesh.position.copy(mid);
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir.normalize());
+    scene.add(mesh);
+  }
+  corners.forEach(c => {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(R,SEG,SEG), loopMat);
+    s.position.copy(c); scene.add(s);
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MAGNET  (attached to right controller grip in VR)
+// ═══════════════════════════════════════════════════════════════════════════
+const magnetGroup = new THREE.Group();
+const northMat = new THREE.MeshBasicMaterial({ color:0xcc3333, transparent:true, opacity:1.0 });
+const southMat = new THREE.MeshBasicMaterial({ color:0x3366cc, transparent:true, opacity:1.0 });
+const halfBoxGeo = new THREE.BoxGeometry(0.0375, 0.0525, 0.0375);
+const nMesh = new THREE.Mesh(halfBoxGeo, northMat);
+const sMesh = new THREE.Mesh(halfBoxGeo, southMat);
+nMesh.position.y =  0.02625;
+sMesh.position.y = -0.02625;
+magnetGroup.add(nMesh, sMesh);
+
+// N / S canvas labels
+const labelMeshes = [];
+(function(){
+  function makeLabel(text) {
+    const c=document.createElement('canvas'); c.width=64; c.height=64;
+    const ctx=c.getContext('2d');
+    ctx.fillStyle='#ffffff'; ctx.font='bold 46px Arial';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(text,32,32);
+    return new THREE.MeshBasicMaterial({
+      map:new THREE.CanvasTexture(c), transparent:true, side:THREE.DoubleSide
+    });
+  }
+  const geo=new THREE.PlaneGeometry(0.030,0.030);
+  const nF=new THREE.Mesh(geo,makeLabel('N')); nF.position.set(0, 0.027, 0.020);
+  const sF=new THREE.Mesh(geo,makeLabel('S')); sF.position.set(0,-0.027, 0.020);
+  const nB=new THREE.Mesh(geo,makeLabel('N')); nB.position.set(0, 0.027,-0.020); nB.rotation.y=Math.PI;
+  const sB=new THREE.Mesh(geo,makeLabel('S')); sB.position.set(0,-0.027,-0.020); sB.rotation.y=Math.PI;
+  magnetGroup.add(nF,sF,nB,sB);
+  labelMeshes.push(nF,sF,nB,sB); // [0]=nF,[1]=sF,[2]=nB,[3]=sB
+})();
+scene.add(magnetGroup);
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  B FIELD ARROWS  (7×7 line-segment grid at loop plane)
+// ═══════════════════════════════════════════════════════════════════════════
+const arrowCount  = DISP_GRID_N * DISP_GRID_N;
+const arrowPosArr = new Float32Array(arrowCount * 18);
+const arrowColArr = new Float32Array(arrowCount * 18);
+const arrowGeo    = new THREE.BufferGeometry();
+arrowGeo.setAttribute('position', new THREE.BufferAttribute(arrowPosArr, 3));
+arrowGeo.setAttribute('color',    new THREE.BufferAttribute(arrowColArr, 3));
+const arrowLines  = new THREE.LineSegments(arrowGeo,
+  new THREE.LineBasicMaterial({ vertexColors:true }));
+scene.add(arrowLines);
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CURRENT MARKERS  (8 magenta 3-D arrows circling the loop)
+// ═══════════════════════════════════════════════════════════════════════════
+const SHAFT_R=0.007, SHAFT_LEN=0.055, CONE_R=0.015, CONE_LEN=0.030;
+const markerMat   = new THREE.MeshBasicMaterial({ color:0xff44cc, transparent:true, opacity:1.0 });
+const markerGroup = new THREE.Group();
+markerGroup.visible = false;
+scene.add(markerGroup);
+const markerMeshes = [];
+for(let m=0; m<N_MARKERS; m++){
+  const g=new THREE.Group();
+  const shaft=new THREE.Mesh(new THREE.CylinderGeometry(SHAFT_R,SHAFT_R,SHAFT_LEN,8), markerMat);
+  shaft.rotation.z=Math.PI/2; shaft.position.x=SHAFT_LEN/2;
+  const cone=new THREE.Mesh(new THREE.ConeGeometry(CONE_R,CONE_LEN,8), markerMat);
+  cone.rotation.z=-Math.PI/2; cone.position.x=SHAFT_LEN+CONE_LEN/2;
+  g.add(shaft,cone); markerGroup.add(g); markerMeshes.push(g);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FLOATING INFO PANEL  (canvas texture, billboards toward headset)
+// ═══════════════════════════════════════════════════════════════════════════
+const PANEL_W=512, PANEL_H=320;
+const panelCanvas = document.createElement('canvas');
+panelCanvas.width=PANEL_W; panelCanvas.height=PANEL_H;
+const pCtx = panelCanvas.getContext('2d');
+const panelTex = new THREE.CanvasTexture(panelCanvas);
+const panelMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.52, 0.33),
+  new THREE.MeshBasicMaterial({ map:panelTex, transparent:true, side:THREE.DoubleSide })
+);
+panelMesh.position.set(0, LOOP_VR_Y + 0.48, LOOP_VR_Z - 0.52);
+scene.add(panelMesh);
+
+function rr(ctx,x,y,w,h,r) {
+  ctx.beginPath(); ctx.moveTo(x+r,y);
+  ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+}
+
+function drawPanel() {
+  const W=PANEL_W, H=PANEL_H;
+  pCtx.clearRect(0,0,W,H);
+
+  // Background
+  pCtx.fillStyle='rgba(5,11,19,0.95)'; rr(pCtx,0,0,W,H,18); pCtx.fill();
+  // Border: amber when frozen, dark blue when live
+  pCtx.strokeStyle = frozen ? '#ffa000' : '#1a3050';
+  pCtx.lineWidth = frozen ? 3 : 2;
+  rr(pCtx,1,1,W-2,H-2,18); pCtx.stroke();
+
+  pCtx.textAlign='center';
+
+  if(frozen) {
+    // ── FROZEN STATE: full Lenz's law breakdown ─────────────────────────
+    // Header with FROZEN badge
+    pCtx.fillStyle='#ffa000';
+    pCtx.font="bold 22px 'Share Tech Mono', monospace";
+    pCtx.fillText("FARADAY'S LAW  ·  ❚❚ FROZEN", W/2, 34);
+
+    pCtx.strokeStyle='#3a2800'; pCtx.lineWidth=1;
+    pCtx.beginPath(); pCtx.moveTo(18,46); pCtx.lineTo(W-18,46); pCtx.stroke();
+
+    const increasing = -emfSmoothed > 0;
+    const active = Math.abs(emfSmoothed) > EMF_THRESH;
+
+    if(!active) {
+      pCtx.fillStyle='#4a3800';
+      pCtx.font="17px 'Share Tech Mono', monospace";
+      pCtx.fillText('Magnet is stationary', W/2, 100);
+      pCtx.fillStyle='#3a2800';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('No changing flux — no EMF', W/2, 126);
+    } else {
+      // Step 1: Magnet motion
+      pCtx.fillStyle='#7aabcf';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.textAlign='left';
+      pCtx.fillText('MAGNET', 24, 68);
+      pCtx.fillStyle='#b8ccd8';
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      const towardLoop = magnetFlipped ? !increasing : increasing;
+      pCtx.fillText(towardLoop ? 'Moving toward loop  ↓' : 'Moving away from loop  ↑', 24, 88);
+
+      // Step 2: Flux
+      pCtx.fillStyle='#69f0ae';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('FLUX', 24, 114);
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Upward flux INCREASING' : 'Upward flux DECREASING', 24, 134);
+
+      // Step 3: Induced B
+      pCtx.fillStyle='#b388ff';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('INDUCED B  (opposes change)', 24, 160);
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Points downward  ↓' : 'Points upward  ↑', 24, 180);
+
+      // Step 4: Current
+      pCtx.fillStyle='#ff44cc';
+      pCtx.font="13px 'Share Tech Mono', monospace";
+      pCtx.fillText('INDUCED CURRENT', 24, 206);
+      pCtx.font="bold 18px 'Rajdhani', sans-serif";
+      pCtx.fillText(increasing ? 'Clockwise  (viewed from above)' : 'Counter-clockwise', 24, 226);
+
+      pCtx.textAlign='center';
+      pCtx.fillStyle='#3a2800';
+      pCtx.font="11px 'Share Tech Mono', monospace";
+      pCtx.fillText('Trigger to resume', W/2, 248);
+    }
+
+  } else {
+    // ── ACTIVE STATE: minimal ───────────────────────────────────────────
+    pCtx.fillStyle='#4fc3f7';
+    pCtx.font="bold 22px 'Share Tech Mono', monospace";
+    pCtx.fillText("FARADAY'S LAW", W/2, 34);
+
+    pCtx.strokeStyle='#0d1e30'; pCtx.lineWidth=1;
+    pCtx.beginPath(); pCtx.moveTo(18,46); pCtx.lineTo(W-18,46); pCtx.stroke();
+
+    const active = Math.abs(emfSmoothed) > EMF_THRESH;
+
+    if(!active) {
+      pCtx.fillStyle='#2a4868';
+      pCtx.font="18px 'Share Tech Mono', monospace";
+      pCtx.fillText('Move the magnet through the loop', W/2, 108);
+      pCtx.fillStyle='#1a3050';
+      pCtx.font="12px 'Share Tech Mono', monospace";
+      pCtx.fillText('Trigger = freeze  ·  A = flip polarity', W/2, 136);
+    } else {
+      const increasing = -emfSmoothed > 0;
+
+      pCtx.fillStyle='#69f0ae';
+      pCtx.font="bold 24px 'Rajdhani', sans-serif";
+      pCtx.fillText('FLUX ' + (increasing ? 'INCREASING  ↑' : 'DECREASING  ↓'), W/2, 90);
+
+      pCtx.fillStyle='#ff44cc';
+      pCtx.font="bold 22px 'Rajdhani', sans-serif";
+      pCtx.fillText('Current: ' + (increasing ? 'clockwise' : 'counter-clockwise'), W/2, 126);
+
+      // EMF bar
+      const bX=56, bY=152, bW=400, bH=14;
+      pCtx.fillStyle='#07111c'; pCtx.fillRect(bX,bY,bW,bH);
+      const fill = Math.min(1.0, Math.abs(emfSmoothed)/EMF_SAT) * bW;
+      const grad = pCtx.createLinearGradient(bX,0,bX+bW,0);
+      grad.addColorStop(0,'#0d2040'); grad.addColorStop(0.5,'#4fc3f7'); grad.addColorStop(1,'#ffd54f');
+      pCtx.fillStyle=grad; pCtx.fillRect(bX,bY,fill,bH);
+      pCtx.strokeStyle='#1a3050'; pCtx.lineWidth=1; pCtx.strokeRect(bX,bY,bW,bH);
+      pCtx.fillStyle='#3a5570';
+      pCtx.font="11px 'Share Tech Mono', monospace";
+      pCtx.fillText('EMF STRENGTH', W/2, bY+bH+16);
+    }
+  }
+
+  panelTex.needsUpdate = true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  WEBXR CONTROLLERS
+//  Index 0 = right hand (Quest convention).
+//  Both grips added to scene; only grip[0] drives the magnet.
+// ═══════════════════════════════════════════════════════════════════════════
+const grips = [
+  renderer.xr.getControllerGrip(0),
+  renderer.xr.getControllerGrip(1)
+];
+grips.forEach(g => scene.add(g));
+
+// Tiny pointer ray on right controller (visual affordance)
+const rayGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(0,0,0), new THREE.Vector3(0,-0.12,0)
+]);
+renderer.xr.getController(0).add(
+  new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color:0x4fc3f7, opacity:0.6, transparent:true }))
+);
+scene.add(renderer.xr.getController(0));
+
+// ─── Determine which grip index is 'right' each frame ───────────────────
+let rightGripIdx = 0;   // default; updated below
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PHYSICS
+// ═══════════════════════════════════════════════════════════════════════════
+function dipoleB(px, pz, MY_arg) {
+  const my = (MY_arg !== undefined) ? MY_arg : magnetY;
+  const M  = magnetStrength * (magnetFlipped ? -1 : 1);
+  const dx=px-magnetX, dy=0-my, dz=pz-magnetZ;
+  const r2 = dx*dx + dy*dy + dz*dz;
+  if(r2 < 0.04) return {x:0, y:0, z:0};   // singularity guard
+  const r5=r2*r2*Math.sqrt(r2), mdr=M*dy;
+  return { x:(3*mdr*dx)/r5, y:(3*mdr*dy - M*r2)/r5, z:(3*mdr*dz)/r5 };
+}
+
+function computePhi(MY_arg) {
+  const step = (2*LOOP_HALF) / (PHI_GRID_N-1);
+  const dA   = step * step;
+  let phi = 0;
+  for(let i=0; i<PHI_GRID_N; i++)
+    for(let j=0; j<PHI_GRID_N; j++)
+      phi += dipoleB(-LOOP_HALF+j*step, -LOOP_HALF+i*step, MY_arg).y * dA;
+  return phi;
+}
+
+// Manual (VR) — windowed finite difference
+function updateEmfManual(phi, ts) {
+  wPhi[wIdx]=phi; wTs[wIdx]=ts;
+  const oldIdx=(wIdx+1)%W_SIZE;
+  if(wFull) {
+    const dPhi=phi - wPhi[oldIdx];
+    const dT  =(ts  -  wTs[oldIdx]) / 1000;
+    if(dT > 0.001) emf = -dPhi / dT;
+  }
+  wIdx=(wIdx+1)%W_SIZE;
+  if(wIdx===0) wFull=true;
+}
+
+// Auto (desktop preview) — analytical derivative
+function computeEmfAuto() {
+  const dYdt = ANIM_AMP * 2*Math.PI * ANIM_SPEED * Math.cos(2*Math.PI*ANIM_SPEED*animateT);
+  const eps=0.1;
+  const dPhidY=(computePhi(magnetY+eps) - computePhi(magnetY-eps)) / (2*eps);
+  return -(dPhidY * dYdt);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ARROW RENDERING
+// ═══════════════════════════════════════════════════════════════════════════
+function arrowColor(by) {
+  const t=Math.tanh(by/(REF_FIELD*1.2));
+  if(t>=0) return { r:0.85+0.15*t, g:0.35+0.30*(1-t), b:0.10 };
+  const n=-t;
+  return { r:0.05, g:0.25+0.25*(1-n), b:0.75+0.25*n };
+}
+
+function setArrow(idx, sx, sz, bx, by, bz) {
+  const mag=Math.sqrt(bx*bx+by*by+bz*bz);
+  const base=idx*18;
+  if(mag<1e-9){
+    for(let k=0;k<18;k++) arrowPosArr[base+k]=0;
+    for(let k=0;k<18;k++) arrowColArr[base+k]=0.1;
+    return;
+  }
+  // Convert sim coords → VR meters
+  const sc=SIM_SCALE;
+  const wx=sx*sc, wy=LOOP_VR_Y+0.001, wz=sz*sc+LOOP_VR_Z;
+  const len=(mag/(mag+REF_FIELD)) * MAX_ARROW * 2 * sc;
+  const ux=bx/mag, uy=by/mag, uz=bz/mag;
+  const ex=wx+ux*len, ey=wy+uy*len, ez=wz+uz*len;
+  const hl=len*ARROW_HEAD, hw=hl*0.45;
+  let px, pyp, pz;
+  if(Math.abs(uy)<0.85){ const d=Math.sqrt(uz*uz+ux*ux+1e-12); px=-uz/d; pyp=0;      pz=ux/d; }
+  else                  { const d=Math.sqrt(uy*uy+uz*uz+1e-12); px=0;     pyp=uz/d;   pz=-uy/d; }
+  const hbx=ex-ux*hl, hby=ey-uy*hl, hbz=ez-uz*hl;
+  arrowPosArr[base+ 0]=wx;         arrowPosArr[base+ 1]=wy;          arrowPosArr[base+ 2]=wz;
+  arrowPosArr[base+ 3]=ex;         arrowPosArr[base+ 4]=ey;          arrowPosArr[base+ 5]=ez;
+  arrowPosArr[base+ 6]=ex;         arrowPosArr[base+ 7]=ey;          arrowPosArr[base+ 8]=ez;
+  arrowPosArr[base+ 9]=hbx+px*hw;  arrowPosArr[base+10]=hby+pyp*hw; arrowPosArr[base+11]=hbz+pz*hw;
+  arrowPosArr[base+12]=ex;         arrowPosArr[base+13]=ey;          arrowPosArr[base+14]=ez;
+  arrowPosArr[base+15]=hbx-px*hw;  arrowPosArr[base+16]=hby-pyp*hw; arrowPosArr[base+17]=hbz-pz*hw;
+  const c=arrowColor(by);
+  for(let v=0;v<6;v++){ arrowColArr[base+v*3]=c.r; arrowColArr[base+v*3+1]=c.g; arrowColArr[base+v*3+2]=c.b; }
+}
+
+function updateArrows() {
+  const step=(2*LOOP_HALF)/(DISP_GRID_N-1);
+  let idx=0;
+  for(let i=0;i<DISP_GRID_N;i++)
+    for(let j=0;j<DISP_GRID_N;j++){
+      const px=-LOOP_HALF+j*step, pz=-LOOP_HALF+i*step;
+      const {x:bx,y:by,z:bz}=dipoleB(px,pz);
+      setArrow(idx++, px, pz, bx, by, bz);
+    }
+  arrowGeo.attributes.position.needsUpdate=true;
+  arrowGeo.attributes.color.needsUpdate=true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CURRENT MARKERS
+// ═══════════════════════════════════════════════════════════════════════════
+function loopPosDir(t) {
+  const s=((t%1)+1)%1, dist=s*4, L=LOOP_HALF*2, sc=SIM_SCALE;
+  if(dist<1){ const u=dist;   return {x:(-LOOP_HALF+u*L)*sc, z:-LOOP_HALF*sc, tx:1,  tz:0}; }
+  if(dist<2){ const u=dist-1; return {x:LOOP_HALF*sc,        z:(-LOOP_HALF+u*L)*sc, tx:0, tz:1}; }
+  if(dist<3){ const u=dist-2; return {x:(LOOP_HALF-u*L)*sc,  z:LOOP_HALF*sc,  tx:-1, tz:0}; }
+  const u=dist-3; return {x:-LOOP_HALF*sc, z:(LOOP_HALF-u*L)*sc, tx:0, tz:-1};
+}
+
+const _fromVec=new THREE.Vector3(1,0,0);
+const _toVec  =new THREE.Vector3();
+
+function updateMarkers(dt) {
+  if(Math.abs(emfSmoothed) < EMF_THRESH){ markerGroup.visible=false; return; }
+  markerGroup.visible=true;
+  const opacity=Math.min(1.0,(Math.abs(emf)-EMF_THRESH)/(EMF_SAT-EMF_THRESH));
+  markerMat.opacity=0.15+0.85*opacity;
+  markerPhase=((markerPhase - EMF_SPEED_K*emfSmoothed*dt) % 1 + 1) % 1;
+  for(let m=0; m<N_MARKERS; m++){
+    const t=(markerPhase + m/N_MARKERS) % 1;
+    const {x,z,tx:rawTx,tz:rawTz}=loopPosDir(t);
+    const dir=emfSmoothed>=0?-1:1;
+    markerMeshes[m].position.set(x, LOOP_VR_Y+0.012, z+LOOP_VR_Z);
+    markerMeshes[m].quaternion.setFromUnitVectors(_fromVec,
+      _toVec.set(rawTx*dir, 0, rawTz*dir).normalize());
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  HAPTICS
+// ═══════════════════════════════════════════════════════════════════════════
+function pulseHaptics(intensity) {
+  const session=renderer.xr.getSession();
+  if(!session) return;
+  session.inputSources.forEach(src => {
+    if(src.handedness==='right' && src.gamepad?.hapticActuators?.length)
+      src.gamepad.hapticActuators[0].pulse(Math.min(1, intensity), 16);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ORBIT + ZOOM (desktop only)
+// ═══════════════════════════════════════════════════════════════════════════
+let isOrbiting=false, lastMX=0, lastMY=0;
+renderer.domElement.addEventListener('mousedown', e=>{
+  if(e.button===0){ isOrbiting=true; lastMX=e.clientX; lastMY=e.clientY; }
+});
+window.addEventListener('mousemove', e=>{
+  if(!isOrbiting) return;
+  camTheta -= (e.clientX-lastMX)*0.008;
+  camPhi = Math.max(0.05, Math.min(Math.PI*0.90, camPhi+(e.clientY-lastMY)*0.008));
+  updateCamera(); lastMX=e.clientX; lastMY=e.clientY;
+});
+window.addEventListener('mouseup', ()=>{ isOrbiting=false; });
+renderer.domElement.addEventListener('wheel', e=>{
+  camRadius=Math.max(1.5, Math.min(8.0, camRadius+e.deltaY*0.004));
+  updateCamera(); e.preventDefault();
+},{ passive:false });
+
+window.addEventListener('resize', ()=>{
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  TEMP VECTORS
+// ═══════════════════════════════════════════════════════════════════════════
+const _gripPos = new THREE.Vector3();
+const _headPos = new THREE.Vector3();
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ANIMATION LOOP
+// ═══════════════════════════════════════════════════════════════════════════
+renderer.setAnimationLoop(function(ts) {
+  const dt = prevTs!==null ? Math.min((ts-prevTs)/1000, 0.05) : 0;
+  prevTs=ts;
+
+  if(isPresenting) {
+    // ── Poll right controller input sources ───────────────────────────────
+    const session = renderer.xr.getSession();
+    if(session) {
+      session.inputSources.forEach((src, i) => {
+        if(i < 2 && src.handedness === 'right') rightGripIdx = i;
+
+        if(src.handedness === 'right' && src.gamepad) {
+          const gp = src.gamepad;
+
+          // Index trigger (axes[3] or buttons[0]) — freeze toggle
+          const trigVal  = gp.buttons[0]?.pressed ?? false;
+          if(trigVal && !prevTrigger) {
+            if(!frozen) {
+              // FREEZE — snap magnet to current sim position
+              frozen     = true;
+              lerpActive = false;
+              frozenMagX = magnetX; frozenMagY = magnetY; frozenMagZ = magnetZ;
+            } else {
+              // UNFREEZE — start lerp back to controller
+              frozen     = false;
+              lerpActive = true;
+              lerpT      = 0;
+              lerpStartX = magnetX; lerpStartY = magnetY; lerpStartZ = magnetZ;
+              // Reset EMF window so no phantom spike
+              wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
+            }
+          }
+          prevTrigger = trigVal;
+
+          // Button A (buttons[4] on Quest) — flip polarity
+          const btnA = gp.buttons[4]?.pressed ?? false;
+          if(btnA && !prevBtnA) {
+            magnetFlipped = !magnetFlipped;
+            northMat.color.setHex(magnetFlipped ? 0x3366cc : 0xcc3333);
+            southMat.color.setHex(magnetFlipped ? 0xcc3333 : 0x3366cc);
+            // Swap N/S label Y positions: [0]=nFront,[1]=sFront,[2]=nBack,[3]=sBack
+            const ny =  (magnetFlipped ? -1 : 1) * 0.027;
+            const sy = -(magnetFlipped ? -1 : 1) * 0.027;
+            labelMeshes[0].position.y = ny; labelMeshes[2].position.y = ny;
+            labelMeshes[1].position.y = sy; labelMeshes[3].position.y = sy;
+            // Reset EMF window on flip
+            wIdx = 0; wFull = false; emf = 0; emfSmoothed = 0;
+          }
+          prevBtnA = btnA;
+        }
+      });
+    }
+
+    grips[rightGripIdx].getWorldPosition(_gripPos);
+    // Live controller sim coords (used for lerp target even while frozen)
+    const ctrlSimX = _gripPos.x / SIM_SCALE;
+    const ctrlSimY = (_gripPos.y - LOOP_VR_Y) / SIM_SCALE;
+    const ctrlSimZ = (_gripPos.z - LOOP_VR_Z) / SIM_SCALE;
+
+    if(frozen) {
+      // Frozen — hold last snapped position, no EMF update
+      magnetX = frozenMagX; magnetY = frozenMagY; magnetZ = frozenMagZ;
+    } else if(lerpActive) {
+      // Lerping back to controller
+      lerpT += dt / LERP_DUR;
+      if(lerpT >= 1.0) { lerpT = 1.0; lerpActive = false; }
+      const ease = lerpT * lerpT * (3 - 2*lerpT);  // smoothstep
+      magnetX = lerpStartX + (ctrlSimX - lerpStartX) * ease;
+      magnetY = lerpStartY + (ctrlSimY - lerpStartY) * ease;
+      magnetZ = lerpStartZ + (ctrlSimZ - lerpStartZ) * ease;
+      // EMF suppressed during lerp — already reset on unfreeze
+    } else {
+      // Normal live tracking
+      magnetX = ctrlSimX; magnetY = ctrlSimY; magnetZ = ctrlSimZ;
+    }
+
+    // Singularity guard
+    if(Math.abs(magnetY) < 0.4) {
+      const r = Math.sqrt(magnetX*magnetX + magnetZ*magnetZ);
+      if(r < 2.0) magnetY = magnetY >= 0 ? 0.4 : -0.4;
+    }
+
+    if(!frozen && !lerpActive) updateEmfManual(computePhi(magnetY), ts);
+
+  } else {
+    // ── Desktop preview: auto-animate ────────────────────────────────────
+    animateT += dt;
+    magnetY = ANIM_CENTER + ANIM_AMP * Math.sin(2*Math.PI*ANIM_SPEED*animateT);
+    emf = computeEmfAuto();
+  }
+
+
+  // -- Smooth EMF: kills tremor noise, preserves intentional motion
+  emfSmoothed += (emf - emfSmoothed) * EMF_SMOOTH;
+  // ── Position magnet mesh (sim coords → VR meters) ─────────────────────
+  magnetGroup.position.set(
+    magnetX * SIM_SCALE,
+    magnetY * SIM_SCALE + LOOP_VR_Y,
+    magnetZ * SIM_SCALE + LOOP_VR_Z
+  );
+
+  // Fade magnet when very close to loop plane (keeps arrows readable)
+  const fadeAbs=Math.abs(magnetY);
+  const fade = fadeAbs>=1.5 ? 1.0 : Math.max(0.15, (fadeAbs-0.5)/1.0);
+  northMat.opacity = fade;
+  southMat.opacity = fade;
+
+  // ── Amber loop wire when frozen ─────────────────────────────────────────
+  loopMat.color.setHex(frozen ? 0xffa000 : 0x4fc3f7);
+
+  // ── Update B arrows (skip if frozen) ─────────────────────────────────────
+  if(!frozen) updateArrows();
+
+  // ── Update current markers ────────────────────────────────────────────
+  updateMarkers(dt);
+
+  // ── Update loop glow disc ─────────────────────────────────────────────
+  if(!frozen) {
+    const phi   = computePhi(magnetY);
+    const glowT = Math.min(1.0, Math.abs(phi) / 0.5);
+    discMat.opacity = 0.02 + 0.13*glowT;
+    if(phi >= 0) discMat.color.setRGB(0.35+0.3*glowT, 0.95, 0.55);
+    else         discMat.color.setRGB(0.15, 0.45+0.1*glowT, 0.92);
+  }
+
+  // ── Panel lazy-follow + billboard ───────────────────────────────────────
+  if(isPresenting) {
+    const xrCam = renderer.xr.getCamera(camera);
+    xrCam.getWorldPosition(_xrCamPos);
+    xrCam.getWorldQuaternion(_xrCamQuat);
+    // Camera forward in world space
+    _camFwd.set(0, 0, -1).applyQuaternion(_xrCamQuat);
+    _camFwd.y = 0;
+    if(_camFwd.lengthSq() < 0.001) _camFwd.set(0, 0, -1);
+    _camFwd.normalize();
+    // Target: PANEL_DIST ahead, PANEL_DROP below eye
+    _panelTarget.copy(_xrCamPos)
+      .addScaledVector(_camFwd, PANEL_DIST);
+    _panelTarget.y = _xrCamPos.y - PANEL_DROP;
+    // Lazy lerp toward target
+    panelMesh.position.lerp(_panelTarget, PANEL_FOLLOW);
+    panelMesh.lookAt(_xrCamPos);
+  } else {
+    panelMesh.lookAt(camera.position);
+  }
+  drawPanel();
+
+  // ── Haptics: higher threshold, gentler curve, hard cap ──────────────
+  if(isPresenting && Math.abs(emfSmoothed) > HAPTIC_THRESH) {
+    const t = (Math.abs(emfSmoothed) - HAPTIC_THRESH) / (EMF_SAT - HAPTIC_THRESH);
+    pulseHaptics(Math.min(HAPTIC_MAX_INT, t * HAPTIC_MAX_INT));
+  }
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
