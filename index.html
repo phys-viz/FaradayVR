@@ -106,6 +106,7 @@ const ANIM_SPEED  = 0.35;
 let magnetX=0, magnetY=4.0, magnetZ=0;
 let magnetStrength=1.0, magnetFlipped=false;
 let emf=0, emfSmoothed=0, markerPhase=0, animateT=0;
+let panelPhi=0;
 const EMF_SMOOTH     = 0.12;            // lower = more smoothing (0.0-1.0)
 const HAPTIC_THRESH  = EMF_SAT * 0.25; // haptics only above 25% of saturation
 const HAPTIC_MAX_INT = 0.45;            // never pulse harder than this
@@ -327,10 +328,21 @@ function rr(ctx,x,y,w,h,r) {
 }
 
 function drawPanel(force = false) {
+  const fluxDirection = panelPhi >= 0 ? 'upward' : 'downward';
+  const fluxArrow = panelPhi >= 0 ? '↑' : '↓';
+  const fluxStrengthening = panelPhi * emfSmoothed < 0;
+  const fluxTrendLabel = fluxStrengthening ? 'INCREASING' : 'DECREASING';
+  const inducedBLabel = fluxStrengthening
+    ? (panelPhi >= 0 ? 'Points downward  ↓' : 'Points upward  ↑')
+    : (panelPhi >= 0 ? 'Points upward  ↑' : 'Points downward  ↓');
+  const currentLabel = fluxStrengthening
+    ? (panelPhi >= 0 ? 'Clockwise  (viewed from above)' : 'Counter-clockwise')
+    : (panelPhi >= 0 ? 'Counter-clockwise' : 'Clockwise  (viewed from above)');
   const panelState = [
     frozen ? 1 : 0,
     magnetFlipped ? 1 : 0,
-    Math.round(emfSmoothed * 1000)
+    Math.round(emfSmoothed * 1000),
+    Math.round(panelPhi * 1000)
   ].join('|');
   if(!force && panelState === lastPanelState) return;
   lastPanelState = panelState;
@@ -383,21 +395,21 @@ function drawPanel(force = false) {
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.fillText('FLUX', 24, 114);
       pCtx.font="bold 18px 'Rajdhani', sans-serif";
-      pCtx.fillText(increasing ? 'Upward flux INCREASING' : 'Upward flux DECREASING', 24, 134);
+      pCtx.fillText(`${fluxTrendLabel} ${fluxDirection.toUpperCase()} FLUX`, 24, 134);
 
  // Step 3: Induced B
       pCtx.fillStyle='#b388ff';
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.fillText('INDUCED B  (opposes change)', 24, 160);
       pCtx.font="bold 18px 'Rajdhani', sans-serif";
-      pCtx.fillText(increasing ? 'Points downward  ↓' : 'Points upward  ↑', 24, 180);
+      pCtx.fillText(inducedBLabel, 24, 180);
 
  // Step 4: Current
       pCtx.fillStyle='#ff44cc';
       pCtx.font="13px 'Share Tech Mono', monospace";
       pCtx.fillText('INDUCED CURRENT', 24, 206);
       pCtx.font="bold 18px 'Rajdhani', sans-serif";
-      pCtx.fillText(increasing ? 'Clockwise  (viewed from above)' : 'Counter-clockwise', 24, 226);
+      pCtx.fillText(currentLabel, 24, 226);
 
       pCtx.textAlign='center';
       pCtx.fillStyle='#3a2800';
@@ -424,15 +436,13 @@ function drawPanel(force = false) {
       pCtx.font="12px 'Share Tech Mono', monospace";
       pCtx.fillText('Trigger = freeze · A = flip polarity', W/2, 136);
     } else {
-      const increasing = -emfSmoothed > 0;
-
       pCtx.fillStyle='#69f0ae';
       pCtx.font="bold 24px 'Rajdhani', sans-serif";
-      pCtx.fillText('FLUX ' + (increasing ? 'INCREASING  ↑' : 'DECREASING  ↓'), W/2, 90);
+      pCtx.fillText(`${fluxTrendLabel} ${fluxDirection.toUpperCase()} FLUX ${fluxArrow}`, W/2, 90);
 
       pCtx.fillStyle='#ff44cc';
       pCtx.font="bold 22px 'Rajdhani', sans-serif";
-      pCtx.fillText('Current: ' + (increasing ? 'clockwise' : 'counter-clockwise'), W/2, 126);
+      pCtx.fillText('Current: ' + currentLabel.toLowerCase(), W/2, 126);
 
  // EMF bar
       const bX=56, bY=152, bW=400, bH=14;
@@ -777,6 +787,7 @@ renderer.setAnimationLoop(function(ts) {
 
  // - - Smooth EMF: kills tremor noise, preserves intentional motion
   emfSmoothed += (emf - emfSmoothed) * EMF_SMOOTH;
+  panelPhi = getFramePhi();
  // - Position magnet mesh (sim coords - VR meters) -
   magnetGroup.position.set(
     magnetX * SIM_SCALE,
